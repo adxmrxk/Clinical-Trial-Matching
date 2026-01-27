@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from typing import Dict, List, Optional
 import uuid
+import random
 from datetime import datetime
 
 from ...schemas.chat import ChatRequest, ChatResponse, ChatMessage
@@ -21,6 +22,12 @@ sessions: Dict[str, ConversationState] = {}
 
 # Cache for trial matches to avoid re-querying
 trial_cache: Dict[str, List[TrialMatch]] = {}
+
+
+def _is_first_message(state: ConversationState) -> bool:
+    """Check if this is the first message in the conversation."""
+    # Only the current user message exists (added before this check)
+    return len(state.messages) <= 1
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -61,6 +68,10 @@ async def chat(request: ChatRequest):
 
     state.patient_profile = profile_result["updated_profile"]
     profile_updated = bool(profile_result["extracted_attributes"])
+    validation_errors = profile_result.get("validation_errors", [])
+
+    # If there are validation errors, we need to re-prompt the user
+    # Don't proceed to trial search until input is valid
 
     # Step 2: Determine current phase and get trial matches if applicable
     trial_matches = []
@@ -69,7 +80,7 @@ async def chat(request: ChatRequest):
 
     if state.phase == 1:
         # Phase 1: Check if we have minimum info to search for trials
-        if _has_minimum_profile(state.patient_profile):
+        if _has_minimum_profile(state.patient_profile, state):
             trial_matches = await _find_matching_trials(state.patient_profile)
 
             if trial_matches:
@@ -115,8 +126,17 @@ async def chat(request: ChatRequest):
         "patient_profile": state.patient_profile,
         "phase": state.phase,
         "gaps": gaps,
-        "trial_context": _get_trial_context(trial_matches) if trial_matches else None
+        "trial_context": _get_trial_context(trial_matches) if trial_matches else None,
+        "asked_medications": state.asked_medications,
+        "asked_prior_treatments": state.asked_prior_treatments
     })
+
+    # Update tracking flags if this question asks about medications or treatments
+    next_tracks_field = question_result.get("next_tracks_field")
+    if next_tracks_field == "asked_medications":
+        state.asked_medications = True
+    elif next_tracks_field == "asked_prior_treatments":
+        state.asked_prior_treatments = True
 
     follow_up_questions = [q["question"] for q in question_result.get("questions", [])]
 
@@ -127,7 +147,8 @@ async def chat(request: ChatRequest):
         trial_matches=trial_matches,
         phase_changed=phase_changed,
         question_result=question_result,
-        gaps=gaps
+        gaps=gaps,
+        validation_errors=validation_errors
     )
 
     # Create response message
@@ -145,10 +166,14 @@ async def chat(request: ChatRequest):
         "timestamp": datetime.utcnow().isoformat()
     })
 
+    # Only show trial matches to the user after Phase 3 (or when Phase 3 is complete)
+    # During Phase 2, trials are found but hidden while we ask follow-up questions
+    show_trials = state.phase == 3 and len(gaps) == 0  # Phase 3 complete, no more gaps
+
     return ChatResponse(
         session_id=session_id,
         message=assistant_message,
-        trial_matches=trial_matches,
+        trial_matches=trial_matches if show_trials else [],
         patient_profile_updated=profile_updated,
         current_phase=state.phase,
         follow_up_questions=follow_up_questions
@@ -161,55 +186,112 @@ async def _generate_response(
     trial_matches: List[TrialMatch],
     phase_changed: bool,
     question_result: dict,
-    gaps: List[dict]
+    gaps: List[dict],
+    validation_errors: List[str] = None
 ) -> str:
     """Generate an appropriate response based on conversation state and phase."""
 
     profile = state.patient_profile
     phase = state.phase
     suggested_response = question_result.get("suggested_response")
+    is_first = _is_first_message(state)
+    validation_errors = validation_errors or []
+
+    # Handle validation errors - re-prompt the user with friendly correction
+    if validation_errors:
+        # Pick varied ways to gently correct
+        corrections = [
+            "Hmm, I think there might be a small mix-up. ",
+            "Oops! I may have misunderstood. ",
+            "Let me clarify - ",
+            "Just to make sure I have this right - ",
+        ]
+        prefix = random.choice(corrections)
+        error_msg = validation_errors[0]  # Show first error
+        return f"{prefix}{error_msg}"
+
+    # Handle first message with warm welcome
+    if is_first and phase == 1:
+        # Check if they already provided medical info in first message
+        if profile.primary_condition:
+            return f"Hello! I'm your Clinical Trial Assistant. Thank you for sharing that you're dealing with {profile.primary_condition}. I'll help you find clinical trials that might be a good fit. First, I need to gather some basic information about you. Could you tell me your age?"
+        else:
+            return "Hello! I'm your Clinical Trial Assistant. I'll ask you a few questions to help find clinical trials that might be a good fit for your situation. Let's start - could you tell me about the medical condition you're seeking treatment for?"
 
     # Build phase-specific system prompt
     if phase == 1:
         phase_instruction = """You are in Phase 1 (Baseline Screening).
-Your goal is to gather basic information: medical condition, age, biological sex, and location.
-Ask naturally and conversationally. Don't overwhelm with too many questions at once."""
+Your goal is to gather basic information: medical condition, age, biological sex, location, diagnosis date, travel preference, medications, and prior treatments.
+Be warm and conversational. Ask one question at a time.
+Acknowledge what they've shared before asking for more information."""
 
     elif phase == 2:
         phase_instruction = f"""You are in Phase 2 (Trial-Driven Questioning).
-You have found {len(trial_matches)} potential trial matches.
-Now ask questions specifically related to trial eligibility criteria.
-Be specific about why you're asking - reference that trials have certain requirements."""
+You have found {len(trial_matches)} potential trial matches based on their condition.
+Now you need to ask MORE SPECIFIC questions related to the eligibility criteria of these trials.
+Explain that certain trials have specific requirements and that's why you're asking.
+Be encouraging - let them know you're making progress in finding matches."""
 
     else:
-        phase_instruction = """You are in Phase 3 (Gap-Filling & Clarification).
-Focus on resolving any remaining uncertainties in eligibility.
-Be gentle and explain that these final details will help finalize the recommendations."""
+        phase_instruction = """You are in Phase 3 (Gap-Filling & Final Clarification).
+You're almost done! Focus on resolving the last few uncertainties.
+Be encouraging and let them know you're close to finalizing their recommendations.
+These are the final details needed to confirm eligibility for the best-matched trials."""
 
-    system_prompt = f"""You are a friendly and professional clinical trial assistant.
+    system_prompt = f"""You are a friendly and empathetic clinical trial assistant.
 
 {phase_instruction}
 
-Guidelines:
-- Be empathetic and conversational
-- Avoid medical jargon
+IMPORTANT - Response Variety Guidelines:
+- NEVER start responses the same way twice in a row
+- Vary your acknowledgments: "Thanks!", "Got it!", "Perfect!", "Great!", "Appreciate that!", "Wonderful!", "That helps!", "Noted!"
+- Vary your transitions: "Now...", "Next up...", "Moving on...", "I'd also like to know...", "One more thing...", "Could you also tell me..."
+- Keep a natural, conversational flow - like talking to a helpful friend
+- Don't be robotic or use the same phrasing repeatedly
+
+Other Guidelines:
+- Be warm, empathetic and conversational
+- Avoid medical jargon when possible
 - Never provide medical advice
-- Keep responses concise (2-4 sentences max)
-- If you have questions to ask, incorporate them naturally
+- Keep responses concise (2-3 sentences)
+- Briefly acknowledge their answer, then ask the next question
 
 Current patient profile:
 {profile.model_dump_json(indent=2)}
 
-{"Suggested follow-up: " + suggested_response if suggested_response else ""}"""
+{"Suggested follow-up question: " + suggested_response if suggested_response else ""}"""
 
     # Build context from recent messages
     recent_messages = state.messages[-6:]
     context = "\n".join([f"{m['role']}: {m['content']}" for m in recent_messages])
 
-    # Phase-specific prompts
+    # Phase transition: entering Phase 2 (trials found!)
     if phase_changed and phase == 2:
-        prompt = f"""The patient just provided enough information to search for trials.
-You found {len(trial_matches)} potential matches.
+        prompt = f"""You just finished collecting baseline information and searched for clinical trials.
+You found {len(trial_matches)} potential clinical trials that match their condition and location.
+
+Now you need to review the eligibility criteria for these trials and ask follow-up questions to determine if they're a good fit.
+
+Recent conversation:
+{context}
+
+Patient's message: {user_message}
+
+Your response MUST follow this structure:
+1. Thank them for providing all the baseline information
+2. Say "Searching for potential trial matches..." or similar
+3. Tell them you found {len(trial_matches)} potential trials that match their profile
+4. Explain that each trial has specific eligibility requirements (inclusion/exclusion criteria)
+5. Tell them you need to ask a few follow-up questions to determine which trials they qualify for
+6. Ask the first eligibility question: {suggested_response or 'Ask about their medical history or other health conditions'}
+
+Example tone: "Thank you for all that information! Let me search for clinical trials that match your profile... Great news - I found {len(trial_matches)} potential trials! Each trial has specific eligibility requirements, so I need to ask you a few more questions to see which ones you'd be a good fit for. [first question]"
+
+Be encouraging - they're making great progress!"""
+
+    # Phase transition: entering Phase 3 (almost done!)
+    elif phase_changed and phase == 3:
+        prompt = f"""You're entering the final phase of eligibility checking. Most information has been collected.
 
 Recent conversation:
 {context}
@@ -217,65 +299,231 @@ Recent conversation:
 Patient's message: {user_message}
 
 Respond by:
-1. Acknowledging their information
-2. Letting them know you found some potential trials
-3. Asking the first trial-specific question (if any): {suggested_response or 'Ask about their medical history details'}
+1. Acknowledge their response warmly
+2. Let them know "We're almost done! Just a few final clarifications."
+3. Explain these last details will help confirm which trials are the best fit
+4. Ask the clarification question: {suggested_response or 'Ask for any final clarifying details'}
 
-Keep it warm and encouraging."""
+Be encouraging - they're very close to seeing their matched trials!"""
 
-    elif phase == 1 and not profile.primary_condition:
-        prompt = f"""This is the start of the conversation or we still need to know their condition.
+    # Phase 3 complete - no more gaps, ready to show trials!
+    elif phase == 3 and len(gaps) == 0:
+        eligible_trials = [m for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE]
+        uncertain_trials = [m for m in trial_matches if m.eligibility_status == EligibilityStatus.UNCERTAIN]
+
+        prompt = f"""The eligibility assessment is COMPLETE! All questions have been answered.
+
+Results:
+- {len(eligible_trials)} trials where the patient appears ELIGIBLE
+- {len(uncertain_trials)} trials with UNCERTAIN eligibility (may still qualify)
+- {len(trial_matches)} total trials reviewed
 
 Recent conversation:
 {context}
 
 Patient's message: {user_message}
 
-Respond warmly and ask about their medical condition if they haven't shared it.
-If they did share it, acknowledge and ask a follow-up from: {suggested_response or 'age or location'}"""
+Respond by:
+1. Thank them for answering all the questions
+2. Announce that the eligibility assessment is complete
+3. Summarize: "Based on your answers, I found X trials you appear to qualify for" (and mention uncertain ones if any)
+4. Tell them the matched trials are now displayed below
+5. Offer to answer any questions about the trials or help them understand the next steps
 
+Be celebratory and helpful - this is the payoff for all their effort!"""
+
+    # Phase 1: Still collecting baseline info
+    elif phase == 1:
+        # Determine what's missing in priority order
+        next_question = None
+        next_reason = None
+
+        if not profile.primary_condition:
+            next_question = "what medical condition they are seeking treatment for"
+            next_reason = "This is the starting point for finding relevant trials."
+        elif profile.age is None:
+            next_question = "their age"
+            next_reason = "Many trials have specific age requirements."
+        elif not profile.biological_sex:
+            next_question = "their biological sex (male/female)"
+            next_reason = "Some trials are designed for specific groups."
+        elif not profile.country:
+            next_question = "what country they are located in"
+            next_reason = "Clinical trials are conducted at specific locations."
+        elif not profile.state_province:
+            next_question = "which state or province they are in"
+            next_reason = "This helps find trials closer to them."
+        elif profile.willing_to_travel is None:
+            next_question = "whether they would be willing to travel for a trial"
+            next_reason = "Some excellent trials may require travel."
+        elif not profile.diagnosis_date:
+            next_question = "when they were first diagnosed"
+            next_reason = "Some trials are for newly diagnosed patients, others for longer-term."
+        elif not state.asked_medications:
+            next_question = "what medications they are currently taking (or none)"
+            next_reason = "Some trials have requirements about current medications."
+        elif not state.asked_prior_treatments:
+            next_question = "what treatments they have already tried (or none)"
+            next_reason = "Many trials look for patients who have or haven't tried specific treatments."
+
+        # Count remaining questions
+        remaining = []
+        if not profile.primary_condition: remaining.append("condition")
+        if profile.age is None: remaining.append("age")
+        if not profile.biological_sex: remaining.append("sex")
+        if not profile.country: remaining.append("country")
+        if not profile.state_province: remaining.append("state")
+        if profile.willing_to_travel is None: remaining.append("travel preference")
+        if not profile.diagnosis_date: remaining.append("diagnosis date")
+        if not state.asked_medications: remaining.append("medications")
+        if not state.asked_prior_treatments: remaining.append("prior treatments")
+
+        prompt = f"""You are in Phase 1: Baseline Screening. Collecting essential information BEFORE searching for trials.
+
+Questions remaining: {len(remaining)} ({', '.join(remaining) if remaining else 'none'})
+Next question should ask about: {next_question or 'nothing - all baseline collected!'}
+Why this matters: {next_reason or 'N/A'}
+
+Recent conversation:
+{context}
+
+Patient's latest message: "{user_message}"
+
+CRITICAL INSTRUCTIONS:
+1. Do NOT mention finding trials yet - you're still gathering info
+2. Do NOT repeat the same opening phrase as your previous messages
+3. Vary your acknowledgment - use different words each time (Thanks/Got it/Perfect/Great/Appreciate that/etc.)
+
+Respond by:
+1. Briefly acknowledge their answer in a FRESH way (not "Thank you for sharing that" every time)
+2. Ask about: {next_question}
+3. Optionally mention why briefly
+
+Keep it to 2-3 sentences. Be natural and conversational, like a friendly assistant.
+
+Example variety (DO NOT copy these exactly, make your own):
+- "Got it! Now, [question]"
+- "Perfect, thanks! [question]"
+- "Great! [question]"
+- "Appreciate that. [question]"
+
+Suggested question to ask: {suggested_response or f'Ask about {next_question}'}"""
+
+    # Phase 2: Continuing trial-driven questions
+    elif phase == 2:
+        high_priority_gaps = [g for g in gaps if g.get("priority") == "high"]
+
+        prompt = f"""Continue asking trial-specific questions. {len(high_priority_gaps)} high-priority questions remaining.
+
+Recent conversation:
+{context}
+
+Patient's message: {user_message}
+
+Respond by:
+1. Acknowledging their response
+2. Asking the next trial-specific question naturally
+3. Briefly mention why this matters for the trials (e.g., "Some trials require..." or "This helps determine...")
+
+Incorporate this question: {suggested_response or 'Ask about their medical history details'}"""
+
+    # Phase 3: Final clarifications
     else:
-        # Default prompt
-        trial_info = ""
-        if trial_matches:
-            eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
-            uncertain_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.UNCERTAIN)
-            trial_info = f"\nCurrent matches: {eligible_count} eligible, {uncertain_count} uncertain eligibility."
-
-        prompt = f"""Continue the conversation naturally.
-{trial_info}
+        prompt = f"""Final phase - resolving last uncertainties.
 
 Recent conversation:
 {context}
 
 Patient's message: {user_message}
 
-{"Incorporate this question: " + suggested_response if suggested_response else "Respond helpfully to their message."}
+Respond by:
+1. Acknowledging their response warmly
+2. If there are more questions, ask gently and explain it's the last few details
+3. If all questions are answered, let them know you're ready to show their matched trials
 
-Keep your response concise and natural."""
+{"Ask this final clarification: " + suggested_response if suggested_response else "Thank them and indicate you have enough information."}"""
 
     try:
         response = await llm_service.generate(prompt, system_prompt, temperature=0.7)
         return response
     except Exception as e:
         print(f"Response generation error: {e}")
-        # Fallback responses by phase
-        if phase == 1:
+
+        # Varied acknowledgments for fallback responses
+        acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!", "Appreciate that!"]
+        ack = random.choice(acks)
+
+        # Fallback responses by phase - ask baseline questions in order
+        if is_first:
+            if profile.primary_condition:
+                return f"Hello! I'm your Clinical Trial Assistant. Thanks for sharing that you're dealing with {profile.primary_condition}. First, I need to gather some basic information. Could you tell me your age?"
+            return "Hello! I'm your Clinical Trial Assistant. I'll ask you a few questions to help find clinical trials that might be a good fit for your situation. Let's start - what medical condition are you hoping to find a trial for?"
+        elif phase == 1:
+            # Ask baseline questions in order with varied acknowledgments
             if not profile.primary_condition:
-                return "Thank you for reaching out. I'm here to help you find clinical trials. Could you tell me about the medical condition you're seeking treatment for?"
-            elif not profile.age:
-                return "That's helpful, thank you. May I ask your age? This helps us find trials with matching eligibility criteria."
+                return "Thanks for reaching out! What medical condition are you hoping to find a trial for?"
+            elif profile.age is None:
+                return f"{ack} Now, could you tell me your age? Many trials have specific age requirements."
+            elif not profile.biological_sex:
+                return f"{ack} What is your biological sex? Some trials are designed for specific groups."
+            elif not profile.country:
+                return f"{ack} What country are you located in? This helps me find trials you can access."
+            elif not profile.state_province:
+                return f"{ack} Which state or province are you in? This helps narrow down nearby trials."
+            elif profile.willing_to_travel is None:
+                return f"{ack} Would you be open to traveling for a trial, or do you prefer something close to home?"
+            elif not profile.diagnosis_date:
+                return f"{ack} When were you first diagnosed? A rough timeframe like 'last year' or 'a few months ago' works fine."
+            elif not state.asked_medications:
+                return f"{ack} Are you currently taking any medications? Just list them, or say 'none' if not."
+            elif not state.asked_prior_treatments:
+                return f"{ack} What treatments have you already tried for this condition? Or 'none' if you haven't tried any yet."
             else:
-                return "Thanks for sharing. What country are you located in? This will help us find trials near you."
+                return f"{ack} I have all the baseline info I need. Searching for potential trial matches... Great news - I found some trials that match your profile! Each trial has specific eligibility requirements, so I need to ask a few follow-up questions to see which ones you'd be a good fit for. Do you have any other medical conditions I should know about?"
         elif phase == 2:
-            return f"I've found {len(trial_matches)} potential trial matches for you. To better evaluate your eligibility, could you tell me more about your medical history and any current medications?"
-        else:
-            return "Thank you for that information. Just a few more details will help me finalize the best trial recommendations for you."
+            if phase_changed:
+                return f"Thank you for all that information! Searching for potential trial matches... I found {len(trial_matches)} potential clinical trials! Each trial has specific eligibility criteria, so I need to ask some follow-up questions to determine which ones you qualify for. Could you tell me about any other medical conditions you have?"
+            else:
+                return f"{ack} To continue checking your eligibility for these trials, could you tell me about any other medical conditions or health issues you have?"
+        elif phase == 3:
+            if len(gaps) == 0:
+                # Assessment complete - show trials
+                eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
+                return f"Thank you for answering all my questions! Your eligibility assessment is complete. Based on your answers, I found {eligible_count} trial(s) you appear to qualify for. You can see your matched trials displayed below. Feel free to ask me any questions about these trials!"
+            else:
+                return f"{ack} We're almost done! Just a couple more details to finalize which trials you qualify for."
 
 
-def _has_minimum_profile(profile: PatientProfile) -> bool:
-    """Check if we have minimum information to search for trials."""
-    return bool(profile.primary_condition)
+def _has_minimum_profile(profile: PatientProfile, state: ConversationState) -> bool:
+    """
+    Check if we have minimum baseline information to search for trials.
+
+    Phase 1 must collect ALL of these before moving to Phase 2:
+    - Primary condition (what they're seeking treatment for)
+    - Age (many trials have age requirements)
+    - Biological sex (some trials are sex-specific)
+    - Country (trials are location-specific)
+    - State/province (more specific location)
+    - Willingness to travel
+    - Diagnosis date (when they were diagnosed)
+    - Current medications (asked, even if answer is "none")
+    - Prior treatments (asked, even if answer is "none")
+    """
+    has_condition = bool(profile.primary_condition)
+    has_age = profile.age is not None
+    has_sex = bool(profile.biological_sex)
+    has_country = bool(profile.country)
+    has_state = bool(profile.state_province)
+    has_travel_preference = profile.willing_to_travel is not None
+    has_diagnosis_date = bool(profile.diagnosis_date)
+
+    # For medications and treatments, check if we've asked (tracked in state)
+    asked_meds = state.asked_medications
+    asked_treatments = state.asked_prior_treatments
+
+    return (has_condition and has_age and has_sex and has_country and
+            has_state and has_travel_preference and has_diagnosis_date and
+            asked_meds and asked_treatments)
 
 
 def _should_transition_to_phase3(trial_matches: List[TrialMatch], gaps: List[dict]) -> bool:

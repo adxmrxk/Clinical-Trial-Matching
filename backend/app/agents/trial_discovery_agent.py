@@ -82,23 +82,25 @@ class TrialDiscoveryAgent(BaseAgent):
             score = 0.0
 
             # Condition match
-            if profile.primary_condition:
+            if profile.primary_condition and isinstance(profile.primary_condition, str):
                 condition_lower = profile.primary_condition.lower()
                 for trial_condition in trial.conditions:
-                    if condition_lower in trial_condition.lower():
+                    if trial_condition and condition_lower in trial_condition.lower():
                         score += 10.0
                         break
 
             # Location match
-            if profile.country:
+            if profile.country and isinstance(profile.country, str):
                 for loc in trial.locations:
-                    if loc.get("country", "").lower() == profile.country.lower():
+                    loc_country = loc.get("country", "") or ""
+                    if loc_country.lower() == profile.country.lower():
                         score += 5.0
                         break
 
-            if profile.state_province:
+            if profile.state_province and isinstance(profile.state_province, str):
                 for loc in trial.locations:
-                    if loc.get("state", "").lower() == profile.state_province.lower():
+                    loc_state = loc.get("state", "") or ""
+                    if loc_state.lower() == profile.state_province.lower():
                         score += 3.0
                         break
 
@@ -114,7 +116,9 @@ class TrialDiscoveryAgent(BaseAgent):
 
             # Sex match
             if profile.biological_sex and trial.sex:
-                if trial.sex.lower() == "all" or trial.sex.lower() == profile.biological_sex.value.lower():
+                trial_sex = trial.sex.lower() if isinstance(trial.sex, str) else ""
+                profile_sex = profile.biological_sex.value.lower() if hasattr(profile.biological_sex, 'value') else str(profile.biological_sex).lower()
+                if trial_sex == "all" or trial_sex == profile_sex:
                     score += 2.0
 
             return score

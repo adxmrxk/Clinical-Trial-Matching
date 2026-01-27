@@ -67,3 +67,7 @@ class ConversationState(BaseModel):
     messages: List[dict] = Field(default_factory=list)
     missing_required_fields: List[str] = Field(default_factory=list)
     candidate_trials: List[str] = Field(default_factory=list, description="Trial IDs being considered")
+
+    # Track which baseline questions have been asked (for questions where empty is valid)
+    asked_medications: bool = Field(False, description="Whether we've asked about current medications")
+    asked_prior_treatments: bool = Field(False, description="Whether we've asked about prior treatments")

@@ -24,8 +24,10 @@ class Settings(BaseSettings):
     # ClinicalTrials.gov API
     CLINICAL_TRIALS_API_BASE: str = "https://clinicaltrials.gov/api/v2"
 
-    # LLM Settings (Groq)
+    # LLM Settings (Groq) - supports multiple keys for rate limit fallback
     GROQ_API_KEY: Optional[str] = None
+    GROQ_API_KEY_2: Optional[str] = None  # Backup key when first one hits rate limit
+    GROQ_API_KEY_3: Optional[str] = None  # Third backup key
     LLM_MODEL: str = "llama-3.3-70b-versatile"
 
     # OpenAI (alternative)

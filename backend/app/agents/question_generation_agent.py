@@ -21,31 +21,55 @@ class QuestionGenerationAgent(BaseAgent):
         )
 
         # Phase 1 baseline questions (asked first, regardless of trials)
+        # Phrased warmly and conversationally
+        # Priority determines the order questions are asked (lower = earlier)
         self.phase1_questions = {
+            "primary_condition": {
+                "question": "What medical condition are you hoping to find a trial for?",
+                "context": "This is the starting point for finding relevant trials for you.",
+                "priority": 0
+            },
             "age": {
-                "question": "Could you tell me your age?",
-                "context": "This helps us find trials with matching age requirements.",
+                "question": "May I ask how old you are? This helps match you with trials that have specific age requirements.",
+                "context": "Different trials accept different age ranges.",
                 "priority": 1
             },
             "biological_sex": {
-                "question": "What is your biological sex?",
-                "context": "Some trials are specific to certain biological sexes.",
+                "question": "Could you share your biological sex? Some trials are designed specifically for certain groups.",
+                "context": "Certain trials focus on conditions that affect specific biological sexes differently.",
                 "priority": 2
             },
-            "primary_condition": {
-                "question": "What medical condition are you seeking treatment for?",
-                "context": "This is the main factor in finding relevant trials.",
-                "priority": 0
-            },
             "country": {
-                "question": "What country are you located in?",
-                "context": "This helps us find trials in your area.",
+                "question": "What country are you located in? This helps me find trials you can actually access.",
+                "context": "Clinical trials are conducted at specific locations.",
                 "priority": 3
             },
             "state_province": {
-                "question": "What state or province are you in?",
-                "context": "This helps narrow down nearby trial locations.",
+                "question": "Which state or province are you in? This helps me find trials closer to you.",
+                "context": "Finding nearby trials makes participation more convenient.",
                 "priority": 4
+            },
+            "willing_to_travel": {
+                "question": "Would you be willing to travel to participate in a clinical trial, or would you prefer trials closer to home?",
+                "context": "Some excellent trials may require travel; knowing your preference helps narrow options.",
+                "priority": 5
+            },
+            "diagnosis_date": {
+                "question": "When were you first diagnosed with this condition? A rough timeframe is fine, like 'last year' or '3 months ago'.",
+                "context": "Some trials are for newly diagnosed patients while others are for those with longer history.",
+                "priority": 6
+            },
+            "current_medications": {
+                "question": "Are you currently taking any medications? If so, could you list them? If not, just let me know.",
+                "context": "Some trials have requirements about current medications or may interact with them.",
+                "priority": 7,
+                "tracks_field": "asked_medications"
+            },
+            "prior_treatments": {
+                "question": "What treatments have you already tried for this condition, if any? This could include medications, therapies, or procedures.",
+                "context": "Many trials are looking for patients who have or haven't tried specific treatments.",
+                "priority": 8,
+                "tracks_field": "asked_prior_treatments"
             }
         }
 
@@ -86,25 +110,35 @@ Always prioritize the patient's comfort while gathering necessary information.""
             phase: int - Current conversation phase (1, 2, or 3)
             gaps: List[dict] - Information gaps from Gap Analysis Agent (for phases 2-3)
             trial_context: Optional context about specific trials
+            asked_medications: bool - Whether medications question has been asked
+            asked_prior_treatments: bool - Whether prior treatments question has been asked
 
         Output:
             questions: List of question objects with text and metadata
             phase_explanation: Why these questions are being asked
             suggested_response: A natural response incorporating questions
+            next_tracks_field: Optional field to mark as asked after this response
         """
         profile: PatientProfile = input_data.get("patient_profile", PatientProfile())
         phase: int = input_data.get("phase", 1)
         gaps: List[dict] = input_data.get("gaps", [])
         trial_context: Optional[str] = input_data.get("trial_context")
+        asked_medications: bool = input_data.get("asked_medications", False)
+        asked_prior_treatments: bool = input_data.get("asked_prior_treatments", False)
 
         if phase == 1:
-            return await self._generate_phase1_questions(profile)
+            return await self._generate_phase1_questions(profile, asked_medications, asked_prior_treatments)
         elif phase == 2:
             return await self._generate_phase2_questions(profile, gaps, trial_context)
         else:  # Phase 3
             return await self._generate_phase3_questions(profile, gaps, trial_context)
 
-    async def _generate_phase1_questions(self, profile: PatientProfile) -> Dict[str, Any]:
+    async def _generate_phase1_questions(
+        self,
+        profile: PatientProfile,
+        asked_medications: bool = False,
+        asked_prior_treatments: bool = False
+    ) -> Dict[str, Any]:
         """Generate baseline screening questions (Phase 1)."""
         profile_dict = profile.model_dump()
         missing = []
@@ -112,6 +146,33 @@ Always prioritize the patient's comfort while gathering necessary information.""
         # Find missing Phase 1 attributes
         for attr, q_info in self.phase1_questions.items():
             value = profile_dict.get(attr)
+
+            # Special handling for medications and prior_treatments (tracked separately)
+            if attr == "current_medications":
+                if not asked_medications:
+                    missing.append({
+                        "attribute": attr,
+                        "question": q_info["question"],
+                        "context": q_info["context"],
+                        "priority": q_info["priority"],
+                        "phase": 1,
+                        "tracks_field": "asked_medications"
+                    })
+                continue
+
+            if attr == "prior_treatments":
+                if not asked_prior_treatments:
+                    missing.append({
+                        "attribute": attr,
+                        "question": q_info["question"],
+                        "context": q_info["context"],
+                        "priority": q_info["priority"],
+                        "phase": 1,
+                        "tracks_field": "asked_prior_treatments"
+                    })
+                continue
+
+            # For all other fields, check if value is None or empty
             if value is None or value == "":
                 missing.append({
                     "attribute": attr,
@@ -124,8 +185,8 @@ Always prioritize the patient's comfort while gathering necessary information.""
         # Sort by priority
         missing.sort(key=lambda x: x["priority"])
 
-        # Take top 2 questions
-        questions = missing[:2]
+        # Take top 1 question at a time for natural conversation flow
+        questions = missing[:1]
 
         # Generate a natural response incorporating the questions
         if questions:
@@ -137,12 +198,16 @@ Always prioritize the patient's comfort while gathering necessary information.""
         else:
             suggested_response = None
 
+        # Track which field this question will mark as asked
+        next_tracks_field = questions[0].get("tracks_field") if questions else None
+
         return {
             "questions": questions,
             "phase": 1,
-            "phase_explanation": "Gathering basic information to start searching for trials.",
+            "phase_explanation": "Phase 1: Collecting baseline information to begin searching for relevant trials.",
             "suggested_response": suggested_response,
-            "all_baseline_collected": len(missing) == 0
+            "all_baseline_collected": len(missing) == 0,
+            "next_tracks_field": next_tracks_field
         }
 
     async def _generate_phase2_questions(
@@ -178,7 +243,7 @@ Always prioritize the patient's comfort while gathering necessary information.""
         return {
             "questions": questions[:3],  # Return up to 3 for display
             "phase": 2,
-            "phase_explanation": "Asking about specific requirements from potential trial matches.",
+            "phase_explanation": "Phase 2: Asking trial-specific questions based on eligibility criteria from matched trials.",
             "suggested_response": suggested_response
         }
 
@@ -219,7 +284,7 @@ Always prioritize the patient's comfort while gathering necessary information.""
         return {
             "questions": questions[:2],
             "phase": 3,
-            "phase_explanation": "Clarifying remaining details to finalize eligibility.",
+            "phase_explanation": "Phase 3: Final clarifications to confirm eligibility and finalize your personalized trial recommendations.",
             "suggested_response": suggested_response
         }
 
@@ -321,29 +386,45 @@ Respond with a JSON array:
         trial_context: Optional[str] = None
     ) -> str:
         """Generate a natural conversational response incorporating questions."""
+        import random
 
         if not questions:
             return ""
 
-        # Simple template-based response for efficiency
+        # Varied acknowledgments
+        acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!", "Appreciate that!", "Wonderful!"]
+        transitions = ["Now,", "Next,", "Moving on,", "Also,", "I'd also like to know -", "One more thing -"]
+
+        # Phase-specific natural responses
         if phase == 1:
             if not profile.primary_condition:
                 return questions[0]["question"]
 
-            intro = "Thank you for that information. "
-            q_text = " ".join([q["question"] for q in questions[:2]])
-            return intro + q_text
+            # Acknowledge and ask next question with variety
+            ack = random.choice(acks)
+            q_text = questions[0]["question"]
+            return f"{ack} {q_text}"
 
         elif phase == 2:
-            intro = "I've found some potential trial matches. To better evaluate your eligibility, "
-            if len(questions) == 1:
-                return intro + questions[0]["question"].lower()
-            else:
-                q1 = questions[0]["question"]
-                return intro + q1
+            # Trial-driven phase - explain we found matches and need specifics
+            intros = [
+                "To help determine which trials you might qualify for, ",
+                "Some trials have specific requirements - ",
+                "To narrow down the best matches, ",
+            ]
+            intro = random.choice(intros)
+            q1 = questions[0]["question"]
+            return intro + q1.lower() if q1[0].isupper() else intro + q1
 
         else:  # Phase 3
-            intro = "Just a few more details to clarify: "
+            # Final clarifications - be encouraging
+            intros = [
+                "We're almost there! ",
+                "Just a bit more - ",
+                "Nearly done! ",
+                "One last thing - "
+            ]
+            intro = random.choice(intros)
             return intro + questions[0]["question"]
 
 
