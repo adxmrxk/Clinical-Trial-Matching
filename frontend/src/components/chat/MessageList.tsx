@@ -13,22 +13,15 @@ interface MessageListProps {
 // Loading animation component
 function LoadingIndicator() {
   return (
-    <div className="flex items-start gap-3 animate-in fade-in duration-300">
-      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-        <svg className="w-5 h-5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" x2="12" y1="19" y2="22"/>
-        </svg>
-      </div>
-      <div className="bg-muted rounded-lg px-4 py-3 max-w-[80%]">
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            <span className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-            <span className="w-2 h-2 bg-primary/60 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-            <span className="w-2 h-2 bg-primary/60 rounded-full animate-bounce"></span>
+    <div className="flex items-start gap-2 animate-in fade-in duration-300">
+      <div className="bg-muted rounded-md px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <div className="flex gap-0.5">
+            <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+            <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+            <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce"></span>
           </div>
-          <span className="text-sm text-muted-foreground ml-2">Processing your request...</span>
+          <span className="text-xs text-muted-foreground ml-1">Processing...</span>
         </div>
       </div>
     </div>
