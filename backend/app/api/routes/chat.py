@@ -30,6 +30,131 @@ def _is_first_message(state: ConversationState) -> bool:
     return len(state.messages) <= 1
 
 
+def _generate_phase2_transition_messages(
+    trial_matches: List[TrialMatch],
+    first_question: str = None
+) -> List[ChatMessage]:
+    """Generate multiple messages for Phase 2 transition.
+
+    Splits the transition into separate chat bubbles for better UX:
+    1. Acknowledgment + searching message
+    2. Results found + explanation of eligibility
+    3. Intro to follow-up questions
+    """
+    from datetime import timedelta
+
+    base_time = datetime.utcnow()
+    messages = []
+
+    # Count only eligible + uncertain trials (these are the ones we'll show)
+    eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
+    uncertain_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.UNCERTAIN)
+    displayable_count = eligible_count + uncertain_count
+
+    # Message 1: Acknowledgment and searching
+    messages.append(ChatMessage(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        content="Thanks for all that information! Let me search for clinical trials that match your profile...",
+        timestamp=base_time
+    ))
+
+    # Message 2: Results found - be specific about what we found
+    if displayable_count > 0:
+        result_msg = f"Great news! I found {displayable_count} potential trial(s) that could be a good fit."
+    else:
+        result_msg = "I searched for trials matching your profile. Let me ask a few more questions to refine the results."
+
+    messages.append(ChatMessage(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        content=result_msg,
+        timestamp=base_time + timedelta(milliseconds=100)
+    ))
+
+    # Message 3: Intro to follow-up + first question
+    if first_question:
+        messages.append(ChatMessage(
+            id=str(uuid.uuid4()),
+            role="assistant",
+            content=f"To confirm your eligibility, I have a few more questions. {first_question}",
+            timestamp=base_time + timedelta(milliseconds=200)
+        ))
+    else:
+        messages.append(ChatMessage(
+            id=str(uuid.uuid4()),
+            role="assistant",
+            content="To determine which trials you qualify for, I need to ask a few more questions.",
+            timestamp=base_time + timedelta(milliseconds=200)
+        ))
+
+    return messages
+
+
+def _generate_phase3_transition_messages(trial_matches: List[TrialMatch]) -> List[ChatMessage]:
+    """Generate messages for Phase 3 transition (showing trials).
+
+    Split into separate chat bubbles:
+    1. Thank you + assessment complete
+    2. Results summary (matches exactly what will be displayed)
+    """
+    from datetime import timedelta
+
+    base_time = datetime.utcnow()
+    messages = []
+
+    # Count by eligibility - only eligible and uncertain will be shown
+    eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
+    uncertain_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.UNCERTAIN)
+    total_shown = eligible_count + uncertain_count
+
+    # Message 1: Thank you
+    messages.append(ChatMessage(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        content="Thanks for answering all my questions! I've completed your eligibility assessment.",
+        timestamp=base_time
+    ))
+
+    # Message 2: Results summary - be specific about exactly what's shown
+    if total_shown == 0:
+        result_msg = "Unfortunately, based on your profile, you don't appear to qualify for the trials I found. You may want to discuss other options with your healthcare provider."
+    elif eligible_count > 0 and uncertain_count > 0:
+        result_msg = f"I'm showing you {total_shown} trial(s) below: {eligible_count} that you appear to qualify for, and {uncertain_count} where you might qualify."
+    elif eligible_count > 0:
+        result_msg = f"Great news! I'm showing you {eligible_count} trial(s) below that you appear to qualify for."
+    else:
+        result_msg = f"I'm showing you {uncertain_count} trial(s) below where you might qualify. These are worth reviewing with your healthcare provider."
+
+    messages.append(ChatMessage(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        content=result_msg,
+        timestamp=base_time + timedelta(milliseconds=100)
+    ))
+
+    return messages
+
+
+def _get_brief_correction(error_code: str) -> str:
+    """Convert error code to brief user-friendly correction message.
+
+    Error codes are in format 'field:expected_type'.
+    Returns a short, direct correction - NO question repetition.
+    """
+    corrections = {
+        "age:number": "I need your age as a number (like 45 or 62).",
+        "age:valid_range": "That age doesn't seem right. Just the number please.",
+        "sex:male_or_female": "Just need male or female for that.",
+        "country:name": "I need a country name (like USA, Canada, etc.).",
+        "state:name": "I need a state or province name.",
+        "travel:yes_or_no": "Just yes or no for the travel question.",
+        "diagnosis:date_or_timeframe": "I need when you were diagnosed (like 'last year' or '2023').",
+    }
+
+    return corrections.get(error_code, "Could you rephrase that?")
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
@@ -91,45 +216,65 @@ async def chat(request: ChatRequest):
                 state.phase = 2
                 phase_changed = True
 
-                # Analyze gaps for Phase 2 questioning
-                gaps = await _analyze_gaps(trial_matches, state.patient_profile)
+                # Analyze gaps for Phase 2 questioning (skip LLM, use fast rule-based)
+                gaps = await _analyze_gaps(trial_matches, state.patient_profile, skip_llm=True)
 
     elif state.phase == 2:
         # Phase 2: Trial-driven questioning
-        # Re-evaluate trials with updated profile
-        if profile_updated:
-            trial_matches = await _find_matching_trials(state.patient_profile)
-            trial_cache[session_id] = trial_matches
-        else:
-            trial_matches = trial_cache.get(session_id, [])
+        # IMPORTANT: Never re-query API in Phase 2 - always use cached trials
+        trial_matches = trial_cache.get(session_id, [])
 
-        # Analyze remaining gaps
-        gaps = await _analyze_gaps(trial_matches, state.patient_profile)
+        # Analyze remaining gaps (skip LLM for speed, filter already-asked)
+        gaps = await _analyze_gaps(trial_matches, state.patient_profile, skip_llm=True)
 
-        # Check if we should move to Phase 3
-        if _should_transition_to_phase3(trial_matches, gaps):
+        # Check if we should show trials:
+        # 1. Asked 5 Phase 2 questions already, OR
+        # 2. No more gaps to ask about
+        if state.phase2_questions_count >= 5 or len(gaps) == 0:
             state.phase = 3
             phase_changed = True
 
     else:  # Phase 3
-        # Phase 3: Gap-filling and final clarification
-        if profile_updated:
-            trial_matches = await _find_matching_trials(state.patient_profile)
-            trial_cache[session_id] = trial_matches
-        else:
-            trial_matches = trial_cache.get(session_id, [])
+        # Phase 3: Show trials - no more questions
+        # IMPORTANT: Never re-query API - always use cached trials
+        trial_matches = trial_cache.get(session_id, [])
+        gaps = []  # No more questions in Phase 3 - just show trials
 
-        gaps = await _analyze_gaps(trial_matches, state.patient_profile)
+    # Filter gaps to remove already-answered topics
+    filtered_gaps = [
+        g for g in gaps
+        if g.get("attribute", "").lower() not in [t.lower() for t in state.answered_topics]
+    ]
 
-    # Step 3: Generate follow-up questions based on phase
+    # Step 3: Generate follow-up questions based on phase (NO LLM - instant)
     question_result = await question_generation_agent.process({
         "patient_profile": state.patient_profile,
         "phase": state.phase,
-        "gaps": gaps,
+        "gaps": filtered_gaps,
         "trial_context": _get_trial_context(trial_matches) if trial_matches else None,
         "asked_medications": state.asked_medications,
-        "asked_prior_treatments": state.asked_prior_treatments
+        "asked_prior_treatments": state.asked_prior_treatments,
+        "session_id": session_id,  # Track asked questions per session
+        "answered_topics": state.answered_topics,  # Pass already answered topics
+        "phase1_asked": set(state.phase1_asked),  # Phase 1 questions already asked - NEVER repeat
+        "phase2_asked": set(state.phase2_asked),  # Phase 2 questions already asked - NEVER repeat
+        "phase2_questions_count": state.phase2_questions_count  # Cap at 5
     })
+
+    # Track the topic being asked so we don't ask again
+    if question_result.get("questions"):
+        asked_attr = question_result["questions"][0].get("attribute", "")
+        if asked_attr:
+            # Track in answered_topics
+            if asked_attr.lower() not in [t.lower() for t in state.answered_topics]:
+                state.answered_topics.append(asked_attr.lower())
+            # Track Phase 1 questions separately - these are NEVER repeated
+            if state.phase == 1 and asked_attr not in state.phase1_asked:
+                state.phase1_asked.append(asked_attr)
+            # Track Phase 2 questions - NEVER repeated, increment counter
+            elif state.phase == 2 and asked_attr not in state.phase2_asked:
+                state.phase2_asked.append(asked_attr)
+                state.phase2_questions_count += 1
 
     # Update tracking flags if this question asks about medications or treatments
     next_tracks_field = question_result.get("next_tracks_field")
@@ -140,40 +285,68 @@ async def chat(request: ChatRequest):
 
     follow_up_questions = [q["question"] for q in question_result.get("questions", [])]
 
-    # Step 4: Generate response
-    response_content = await _generate_response(
-        state=state,
-        user_message=request.message,
-        trial_matches=trial_matches,
-        phase_changed=phase_changed,
-        question_result=question_result,
-        gaps=gaps,
-        validation_errors=validation_errors
-    )
+    # Step 4: Generate response(s)
+    # For phase transitions, we return multiple messages for a better UX
+    messages_list = []
 
-    # Create response message
-    assistant_message = ChatMessage(
+    if phase_changed and state.phase == 2:
+        # Phase 2 transition - split into multiple messages
+        messages_list = _generate_phase2_transition_messages(
+            trial_matches=trial_matches,
+            first_question=question_result.get("suggested_response")
+        )
+    elif phase_changed and state.phase == 3:
+        # Phase 3 transition - show trials!
+        messages_list = _generate_phase3_transition_messages(trial_matches)
+    else:
+        # Single message for normal flow
+        response_content = await _generate_response(
+            state=state,
+            user_message=request.message,
+            trial_matches=trial_matches,
+            phase_changed=phase_changed,
+            question_result=question_result,
+            gaps=gaps,
+            validation_errors=validation_errors
+        )
+        messages_list = [ChatMessage(
+            id=str(uuid.uuid4()),
+            role="assistant",
+            content=response_content,
+            timestamp=datetime.utcnow()
+        )]
+
+    # Primary message is the last one (for backwards compatibility)
+    assistant_message = messages_list[-1] if messages_list else ChatMessage(
         id=str(uuid.uuid4()),
         role="assistant",
-        content=response_content,
+        content="I'm here to help you find clinical trials.",
         timestamp=datetime.utcnow()
     )
 
-    # Add to history
-    state.messages.append({
-        "role": "assistant",
-        "content": response_content,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    # Add all messages to history
+    for msg in messages_list:
+        state.messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat()
+        })
 
-    # Only show trial matches to the user after Phase 3 (or when Phase 3 is complete)
+    # Show trial matches when we reach Phase 3 (after 5 Phase 2 questions or no more gaps)
     # During Phase 2, trials are found but hidden while we ask follow-up questions
-    show_trials = state.phase == 3 and len(gaps) == 0  # Phase 3 complete, no more gaps
+    show_trials = state.phase == 3
+
+    # Only show eligible and uncertain trials (not ineligible ones)
+    displayable_trials = [
+        m for m in trial_matches
+        if m.eligibility_status in (EligibilityStatus.ELIGIBLE, EligibilityStatus.UNCERTAIN)
+    ] if show_trials else []
 
     return ChatResponse(
         session_id=session_id,
         message=assistant_message,
-        trial_matches=trial_matches if show_trials else [],
+        messages=messages_list,  # All messages for frontend to display
+        trial_matches=displayable_trials,
         patient_profile_updated=profile_updated,
         current_phase=state.phase,
         follow_up_questions=follow_up_questions
@@ -189,34 +362,31 @@ async def _generate_response(
     gaps: List[dict],
     validation_errors: List[str] = None
 ) -> str:
-    """Generate an appropriate response based on conversation state and phase."""
+    """Generate an appropriate response based on conversation state and phase.
 
+    OPTIMIZED: Uses pre-built responses for speed. Only uses LLM for complex transitions.
+    """
     profile = state.patient_profile
     phase = state.phase
     suggested_response = question_result.get("suggested_response")
     is_first = _is_first_message(state)
     validation_errors = validation_errors or []
 
-    # Handle validation errors - re-prompt the user with friendly correction
-    if validation_errors:
-        # Pick varied ways to gently correct
-        corrections = [
-            "Hmm, I think there might be a small mix-up. ",
-            "Oops! I may have misunderstood. ",
-            "Let me clarify - ",
-            "Just to make sure I have this right - ",
-        ]
-        prefix = random.choice(corrections)
-        error_msg = validation_errors[0]  # Show first error
-        return f"{prefix}{error_msg}"
+    # Varied acknowledgments for natural conversation
+    acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!", "Appreciate that!", "Understood!"]
+    ack = random.choice(acks)
 
-    # Handle first message with warm welcome
+    # Handle validation errors - brief correction, NO question repeat
+    if validation_errors:
+        # Just state what's needed, don't repeat the full question
+        return _get_brief_correction(validation_errors[0])
+
+    # Handle first message - user already got greeting from frontend
     if is_first and phase == 1:
-        # Check if they already provided medical info in first message
         if profile.primary_condition:
-            return f"Hello! I'm your Clinical Trial Assistant. Thank you for sharing that you're dealing with {profile.primary_condition}. I'll help you find clinical trials that might be a good fit. First, I need to gather some basic information about you. Could you tell me your age?"
+            return f"Thanks for sharing that you're dealing with {profile.primary_condition}. I'll help you find trials that might be a good fit. Could you tell me your age?"
         else:
-            return "Hello! I'm your Clinical Trial Assistant. I'll ask you a few questions to help find clinical trials that might be a good fit for your situation. Let's start - could you tell me about the medical condition you're seeking treatment for?"
+            return "Thanks for reaching out! What medical condition are you looking for a trial for?"
 
     # Build phase-specific system prompt
     if phase == 1:
@@ -333,56 +503,14 @@ Respond by:
 Be celebratory and helpful - this is the payoff for all their effort!"""
 
     # Phase 1: Still collecting baseline info
+    # IMPORTANT: Only use suggested_response from question_generation_agent
+    # That agent tracks phase1_asked to NEVER repeat questions
     elif phase == 1:
-        # Determine what's missing in priority order
-        next_question = None
-        next_reason = None
+        # If no suggested_response, all questions have been asked - just acknowledge
+        if not suggested_response:
+            return f"{ack} I have all the information I need. Let me search for trials..."
 
-        if not profile.primary_condition:
-            next_question = "what medical condition they are seeking treatment for"
-            next_reason = "This is the starting point for finding relevant trials."
-        elif profile.age is None:
-            next_question = "their age"
-            next_reason = "Many trials have specific age requirements."
-        elif not profile.biological_sex:
-            next_question = "their biological sex (male/female)"
-            next_reason = "Some trials are designed for specific groups."
-        elif not profile.country:
-            next_question = "what country they are located in"
-            next_reason = "Clinical trials are conducted at specific locations."
-        elif not profile.state_province:
-            next_question = "which state or province they are in"
-            next_reason = "This helps find trials closer to them."
-        elif profile.willing_to_travel is None:
-            next_question = "whether they would be willing to travel for a trial"
-            next_reason = "Some excellent trials may require travel."
-        elif not profile.diagnosis_date:
-            next_question = "when they were first diagnosed"
-            next_reason = "Some trials are for newly diagnosed patients, others for longer-term."
-        elif not state.asked_medications:
-            next_question = "what medications they are currently taking (or none)"
-            next_reason = "Some trials have requirements about current medications."
-        elif not state.asked_prior_treatments:
-            next_question = "what treatments they have already tried (or none)"
-            next_reason = "Many trials look for patients who have or haven't tried specific treatments."
-
-        # Count remaining questions
-        remaining = []
-        if not profile.primary_condition: remaining.append("condition")
-        if profile.age is None: remaining.append("age")
-        if not profile.biological_sex: remaining.append("sex")
-        if not profile.country: remaining.append("country")
-        if not profile.state_province: remaining.append("state")
-        if profile.willing_to_travel is None: remaining.append("travel preference")
-        if not profile.diagnosis_date: remaining.append("diagnosis date")
-        if not state.asked_medications: remaining.append("medications")
-        if not state.asked_prior_treatments: remaining.append("prior treatments")
-
-        prompt = f"""You are in Phase 1: Baseline Screening. Collecting essential information BEFORE searching for trials.
-
-Questions remaining: {len(remaining)} ({', '.join(remaining) if remaining else 'none'})
-Next question should ask about: {next_question or 'nothing - all baseline collected!'}
-Why this matters: {next_reason or 'N/A'}
+        prompt = f"""You are in Phase 1: Baseline Screening.
 
 Recent conversation:
 {context}
@@ -390,42 +518,33 @@ Recent conversation:
 Patient's latest message: "{user_message}"
 
 CRITICAL INSTRUCTIONS:
-1. Do NOT mention finding trials yet - you're still gathering info
-2. Do NOT repeat the same opening phrase as your previous messages
-3. Vary your acknowledgment - use different words each time (Thanks/Got it/Perfect/Great/Appreciate that/etc.)
+1. Briefly acknowledge their answer (vary your acknowledgment each time)
+2. Ask EXACTLY this question: {suggested_response}
+3. Keep it to 2 sentences max
 
-Respond by:
-1. Briefly acknowledge their answer in a FRESH way (not "Thank you for sharing that" every time)
-2. Ask about: {next_question}
-3. Optionally mention why briefly
+Do NOT ask any other question. Only ask the one provided above."""
 
-Keep it to 2-3 sentences. Be natural and conversational, like a friendly assistant.
-
-Example variety (DO NOT copy these exactly, make your own):
-- "Got it! Now, [question]"
-- "Perfect, thanks! [question]"
-- "Great! [question]"
-- "Appreciate that. [question]"
-
-Suggested question to ask: {suggested_response or f'Ask about {next_question}'}"""
-
-    # Phase 2: Continuing trial-driven questions
+    # Phase 2: Trial-driven questions
+    # IMPORTANT: Only use suggested_response from question_generation_agent
+    # That agent tracks phase2_asked to NEVER repeat questions
     elif phase == 2:
-        high_priority_gaps = [g for g in gaps if g.get("priority") == "high"]
+        # If no suggested_response, all Phase 2 questions done - move to show trials
+        if not suggested_response:
+            return f"{ack} I have all the information I need to show you your matched trials!"
 
-        prompt = f"""Continue asking trial-specific questions. {len(high_priority_gaps)} high-priority questions remaining.
+        prompt = f"""You are in Phase 2: Asking trial eligibility questions.
 
 Recent conversation:
 {context}
 
 Patient's message: {user_message}
 
-Respond by:
-1. Acknowledging their response
-2. Asking the next trial-specific question naturally
-3. Briefly mention why this matters for the trials (e.g., "Some trials require..." or "This helps determine...")
+CRITICAL INSTRUCTIONS:
+1. Briefly acknowledge their answer (vary your acknowledgment each time)
+2. Ask EXACTLY this question: {suggested_response}
+3. Keep it to 2 sentences max
 
-Incorporate this question: {suggested_response or 'Ask about their medical history details'}"""
+Do NOT ask any other question. Only ask the one provided above."""
 
     # Phase 3: Final clarifications
     else:
@@ -449,49 +568,14 @@ Respond by:
     except Exception as e:
         print(f"Response generation error: {e}")
 
-        # Varied acknowledgments for fallback responses
-        acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!", "Appreciate that!"]
-        ack = random.choice(acks)
-
-        # Fallback responses by phase - ask baseline questions in order
-        if is_first:
-            if profile.primary_condition:
-                return f"Hello! I'm your Clinical Trial Assistant. Thanks for sharing that you're dealing with {profile.primary_condition}. First, I need to gather some basic information. Could you tell me your age?"
-            return "Hello! I'm your Clinical Trial Assistant. I'll ask you a few questions to help find clinical trials that might be a good fit for your situation. Let's start - what medical condition are you hoping to find a trial for?"
-        elif phase == 1:
-            # Ask baseline questions in order with varied acknowledgments
-            if not profile.primary_condition:
-                return "Thanks for reaching out! What medical condition are you hoping to find a trial for?"
-            elif profile.age is None:
-                return f"{ack} Now, could you tell me your age? Many trials have specific age requirements."
-            elif not profile.biological_sex:
-                return f"{ack} What is your biological sex? Some trials are designed for specific groups."
-            elif not profile.country:
-                return f"{ack} What country are you located in? This helps me find trials you can access."
-            elif not profile.state_province:
-                return f"{ack} Which state or province are you in? This helps narrow down nearby trials."
-            elif profile.willing_to_travel is None:
-                return f"{ack} Would you be open to traveling for a trial, or do you prefer something close to home?"
-            elif not profile.diagnosis_date:
-                return f"{ack} When were you first diagnosed? A rough timeframe like 'last year' or 'a few months ago' works fine."
-            elif not state.asked_medications:
-                return f"{ack} Are you currently taking any medications? Just list them, or say 'none' if not."
-            elif not state.asked_prior_treatments:
-                return f"{ack} What treatments have you already tried for this condition? Or 'none' if you haven't tried any yet."
-            else:
-                return f"{ack} I have all the baseline info I need. Searching for potential trial matches... Great news - I found some trials that match your profile! Each trial has specific eligibility requirements, so I need to ask a few follow-up questions to see which ones you'd be a good fit for. Do you have any other medical conditions I should know about?"
-        elif phase == 2:
-            if phase_changed:
-                return f"Thank you for all that information! Searching for potential trial matches... I found {len(trial_matches)} potential clinical trials! Each trial has specific eligibility criteria, so I need to ask some follow-up questions to determine which ones you qualify for. Could you tell me about any other medical conditions you have?"
-            else:
-                return f"{ack} To continue checking your eligibility for these trials, could you tell me about any other medical conditions or health issues you have?"
+        # Fallback: Use suggested_response directly (respects phase1_asked/phase2_asked tracking)
+        if suggested_response:
+            return f"{ack} {suggested_response}"
         elif phase == 3:
-            if len(gaps) == 0:
-                # Assessment complete - show trials
-                eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
-                return f"Thank you for answering all my questions! Your eligibility assessment is complete. Based on your answers, I found {eligible_count} trial(s) you appear to qualify for. You can see your matched trials displayed below. Feel free to ask me any questions about these trials!"
-            else:
-                return f"{ack} We're almost done! Just a couple more details to finalize which trials you qualify for."
+            eligible_count = sum(1 for m in trial_matches if m.eligibility_status == EligibilityStatus.ELIGIBLE)
+            return f"Your eligibility assessment is complete. I found {eligible_count} trial(s) you may qualify for. Check them out below!"
+        else:
+            return f"{ack} Let me process that."
 
 
 def _has_minimum_profile(profile: PatientProfile, state: ConversationState) -> bool:
@@ -541,10 +625,33 @@ def _should_transition_to_phase3(trial_matches: List[TrialMatch], gaps: List[dic
     return has_eligible or len(high_priority_gaps) <= 1
 
 
-async def _analyze_gaps(trial_matches: List[TrialMatch], profile: PatientProfile) -> List[dict]:
-    """Use Gap Analysis Agent to identify missing information."""
+async def _analyze_gaps(trial_matches: List[TrialMatch], profile: PatientProfile, skip_llm: bool = False) -> List[dict]:
+    """Use Gap Analysis Agent to identify missing information.
+
+    Args:
+        skip_llm: If True, only use rule-based gap detection (faster, no API call)
+    """
     if not trial_matches:
         return []
+
+    # Quick rule-based detection without LLM call
+    if skip_llm:
+        gaps = []
+        for match in trial_matches:
+            for criterion in match.criteria_unknown:
+                gaps.append({
+                    "attribute": criterion.attribute or "unknown",
+                    "reason": criterion.original_text[:100],
+                    "priority": "medium"
+                })
+        # Deduplicate by attribute
+        seen = set()
+        unique_gaps = []
+        for g in gaps:
+            if g["attribute"] not in seen:
+                seen.add(g["attribute"])
+                unique_gaps.append(g)
+        return unique_gaps[:5]  # Limit to 5 gaps
 
     gap_result = await gap_analysis_agent.process({
         "trial_matches": trial_matches,
@@ -582,7 +689,7 @@ async def _find_matching_trials(profile: PatientProfile) -> List[TrialMatch]:
     trials = discovery_result.get("trials", [])
     matches = []
 
-    for trial in trials[:5]:  # Limit to top 5 for performance
+    for trial in trials[:3]:  # Limit to top 3 for performance and API savings
         # Extract criteria
         criteria_result = await criteria_extraction_agent.process({"trial": trial})
 
@@ -628,4 +735,6 @@ async def delete_session(session_id: str):
         del sessions[session_id]
     if session_id in trial_cache:
         del trial_cache[session_id]
+    # Clear asked questions tracking
+    question_generation_agent.clear_session(session_id)
     return {"status": "deleted"}

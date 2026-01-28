@@ -7,6 +7,7 @@ class ApiService {
 
   async sendMessage(message: string): Promise<{
     response: string;
+    responses: string[];  // Multiple responses for phase transitions
     trials: ClinicalTrial[];
     sessionId: string;
   }> {
@@ -31,8 +32,14 @@ class ApiService {
     // Convert trial matches to simplified format for UI
     const trials = data.trial_matches.map(this.convertTrialMatch);
 
+    // Get all message contents (for phase transitions with multiple messages)
+    const responses = data.messages && data.messages.length > 0
+      ? data.messages.map(m => m.content)
+      : [data.message.content];
+
     return {
-      response: data.message.content,
+      response: data.message.content,  // Primary response (backwards compatible)
+      responses,  // All responses for multi-message display
       trials,
       sessionId: data.session_id,
     };

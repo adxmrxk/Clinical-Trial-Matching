@@ -142,6 +142,9 @@ Return JSON with any NEW information found in this message."""
         """
         Validate extracted data and fix common mistakes.
         Returns (validated_data, list_of_validation_errors)
+
+        IMPORTANT: Error messages are BRIEF - just state what's needed.
+        Do NOT repeat the full question - the user already answered.
         """
         errors = []
         validated = {}
@@ -160,20 +163,20 @@ Return JSON with any NEW information found in this message."""
                     else:
                         # Check if it's actually a sex value
                         if str(value).lower() in self.valid_sexes:
-                            errors.append(f"It looks like '{value}' might be your biological sex, not your age. Could you please tell me your age in years?")
+                            errors.append("age:number")  # Brief type indicator
                             continue
                         else:
-                            errors.append(f"I couldn't understand '{value}' as an age. Could you please provide your age as a number?")
+                            errors.append("age:number")
                             continue
 
                 if isinstance(value, (int, float)):
                     value = int(value)
                     if value < 0 or value > 120:
-                        errors.append(f"The age '{value}' doesn't seem right. Could you please confirm your age?")
+                        errors.append("age:valid_range")
                         continue
                     validated[key] = value
                 else:
-                    errors.append("Could you please tell me your age as a number?")
+                    errors.append("age:number")
 
             # Validate BIOLOGICAL SEX
             elif key == "biological_sex":
@@ -181,7 +184,7 @@ Return JSON with any NEW information found in this message."""
 
                 # Check if it's actually a number (meant for age)
                 if value_lower.isdigit():
-                    errors.append(f"It looks like '{value}' might be your age, not your biological sex. Could you please tell me your biological sex (male/female)?")
+                    errors.append("sex:male_or_female")
                     continue
 
                 # Normalize sex values
@@ -192,7 +195,7 @@ Return JSON with any NEW information found in this message."""
                 elif value_lower in {"other", "non-binary", "nonbinary", "nb"}:
                     validated[key] = "other"
                 else:
-                    errors.append(f"I didn't understand '{value}' as a biological sex. Could you please specify male, female, or other?")
+                    errors.append("sex:male_or_female")
 
             # Validate COUNTRY
             elif key == "country":
@@ -200,12 +203,12 @@ Return JSON with any NEW information found in this message."""
 
                 # Check if it's a number (wrong field)
                 if value_str.isdigit():
-                    errors.append(f"'{value}' doesn't look like a country name. What country are you located in?")
+                    errors.append("country:name")
                     continue
 
                 # Check if it looks like a sex value
                 if value_str.lower() in self.valid_sexes:
-                    errors.append(f"It looks like '{value}' might be your biological sex, not your country. What country are you located in?")
+                    errors.append("country:name")
                     continue
 
                 validated[key] = value_str
@@ -215,7 +218,7 @@ Return JSON with any NEW information found in this message."""
                 value_str = str(value).strip()
 
                 if value_str.isdigit():
-                    errors.append(f"'{value}' doesn't look like a state/province name. Which state or province are you in?")
+                    errors.append("state:name")
                     continue
 
                 validated[key] = value_str
@@ -231,7 +234,7 @@ Return JSON with any NEW information found in this message."""
                     elif value_lower in {"no", "false", "nope", "not", "prefer not", "local", "close"}:
                         validated[key] = False
                     else:
-                        errors.append(f"I didn't understand '{value}'. Would you be willing to travel for a trial? (yes/no)")
+                        errors.append("travel:yes_or_no")
 
             # Validate DIAGNOSIS DATE
             elif key == "diagnosis_date":
@@ -243,7 +246,7 @@ Return JSON with any NEW information found in this message."""
                     if int(value_str) > 1900 and int(value_str) <= 2026:
                         validated[key] = value_str
                     else:
-                        errors.append(f"'{value}' doesn't look like a diagnosis date. When were you diagnosed? (e.g., 'last year', '2023', '6 months ago')")
+                        errors.append("diagnosis:date_or_timeframe")
                         continue
                 else:
                     validated[key] = value_str

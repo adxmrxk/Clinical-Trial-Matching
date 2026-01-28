@@ -24,14 +24,16 @@ class Settings(BaseSettings):
     # ClinicalTrials.gov API
     CLINICAL_TRIALS_API_BASE: str = "https://clinicaltrials.gov/api/v2"
 
-    # LLM Settings (Groq) - supports multiple keys for rate limit fallback
+    # LLM Settings - supports multiple keys for rate limit fallback
+    # Fallback order: Groq 1 -> Gemini 1 -> Groq 2 (last resort)
     GROQ_API_KEY: Optional[str] = None
-    GROQ_API_KEY_2: Optional[str] = None  # Backup key when first one hits rate limit
-    GROQ_API_KEY_3: Optional[str] = None  # Third backup key
-    LLM_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_API_KEY_2: Optional[str] = None  # Last resort backup
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
-    # OpenAI (alternative)
-    OPENAI_API_KEY: Optional[str] = None
+    # Google Gemini
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY_2: Optional[str] = None  # Gemini backup
+    GEMINI_MODEL: str = "gemini-2.0-flash"
 
 
 settings = Settings()

@@ -99,6 +99,7 @@ export type EligibilityStatus = 'eligible' | 'ineligible' | 'uncertain';
 export interface ChatResponse {
   session_id: string;
   message: Message;
+  messages: Message[];  // Multiple messages for phase transitions
   trial_matches: TrialMatch[];
   patient_profile_updated: boolean;
   current_phase: number;

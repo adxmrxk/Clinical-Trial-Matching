@@ -19,9 +19,10 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """Response from backend with assistant message and optional trial matches."""
+    """Response from backend with assistant message(s) and optional trial matches."""
     session_id: str
-    message: ChatMessage
+    message: ChatMessage  # Primary message (for backwards compatibility)
+    messages: List[ChatMessage] = Field(default_factory=list)  # Multiple messages for phase transitions
     trial_matches: List[TrialMatch] = Field(default_factory=list)
     patient_profile_updated: bool = False
     current_phase: int = Field(1, description="Current questioning phase")

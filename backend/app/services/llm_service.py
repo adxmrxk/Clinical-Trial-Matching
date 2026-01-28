@@ -1,94 +1,101 @@
-from typing import Optional, List
+from typing import Optional, List, Tuple, Any
 from groq import AsyncGroq
-from openai import AsyncOpenAI
+from google import genai
 from ..core.config import settings
 
 
 class LLMService:
     """
-    Service for interacting with LLMs (Groq/LLaMA or OpenAI).
-    Supports multiple Groq API keys with automatic failover on rate limits.
+    Service for interacting with LLMs (Groq and Google Gemini).
+    Fallback order: Groq 1 -> Gemini 1 -> Gemini 2 -> Groq 2 (last resort)
     """
 
     def __init__(self):
-        self.groq_clients: List[AsyncGroq] = []
-        self.groq_key_names: List[str] = []  # For logging which key is being used
-        self.current_groq_index: int = 0
-        self.openai_client: Optional[AsyncOpenAI] = None
+        # List of (client, name, provider) tuples in fallback order
+        self.clients: List[Tuple[Any, str, str]] = []
+        self.current_index: int = 0
 
-        # Initialize Groq clients (support multiple keys)
+        # Build fallback chain: Groq 1 -> Gemini 1 -> Gemini 2 -> Groq 2
+
+        # 1. Groq primary
         if settings.GROQ_API_KEY:
-            self.groq_clients.append(AsyncGroq(api_key=settings.GROQ_API_KEY))
-            self.groq_key_names.append("GROQ_API_KEY (primary)")
+            client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+            self.clients.append((client, "GROQ_API_KEY (primary)", "groq"))
 
+        # 2. Gemini primary
+        if settings.GEMINI_API_KEY:
+            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            self.clients.append((client, "GEMINI_API_KEY (primary)", "gemini"))
+
+        # 3. Gemini backup
+        if settings.GEMINI_API_KEY_2:
+            client = genai.Client(api_key=settings.GEMINI_API_KEY_2)
+            self.clients.append((client, "GEMINI_API_KEY_2 (backup)", "gemini"))
+
+        # 4. Groq last resort
         if settings.GROQ_API_KEY_2:
-            self.groq_clients.append(AsyncGroq(api_key=settings.GROQ_API_KEY_2))
-            self.groq_key_names.append("GROQ_API_KEY_2 (backup)")
-
-        if settings.GROQ_API_KEY_3:
-            self.groq_clients.append(AsyncGroq(api_key=settings.GROQ_API_KEY_3))
-            self.groq_key_names.append("GROQ_API_KEY_3 (backup 2)")
-
-        # Initialize OpenAI client
-        if settings.OPENAI_API_KEY:
-            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            client = AsyncGroq(api_key=settings.GROQ_API_KEY_2)
+            self.clients.append((client, "GROQ_API_KEY_2 (last resort)", "groq"))
 
         # Log available services
-        print(f"LLM Service initialized:")
-        print(f"  - Groq keys available: {len(self.groq_clients)}")
-        print(f"  - OpenAI available: {self.openai_client is not None}")
+        print(f"LLM Service initialized with {len(self.clients)} providers:")
+        for _, name, provider in self.clients:
+            print(f"  - {name} ({provider})")
 
     def _is_rate_limit_error(self, error: Exception) -> bool:
-        """Check if the error is a rate limit error (429)."""
+        """Check if the error is a rate limit error."""
         error_str = str(error).lower()
-        return "429" in error_str or "rate limit" in error_str or "rate_limit" in error_str
+        return (
+            "429" in error_str or
+            "rate limit" in error_str or
+            "rate_limit" in error_str or
+            "quota" in error_str or
+            "resource exhausted" in error_str
+        )
 
     async def _try_groq(
             self,
+            client: AsyncGroq,
             messages: List[dict],
             temperature: float,
             max_tokens: int
-    ) -> Optional[str]:
-        """Try all available Groq clients, switching on rate limit errors."""
+    ) -> str:
+        """Try a Groq client."""
+        response = await client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        return response.choices[0].message.content
 
-        if not self.groq_clients:
-            return None
+    async def _try_gemini(
+            self,
+            client: genai.Client,
+            messages: List[dict],
+            temperature: float,
+            max_tokens: int
+    ) -> str:
+        """Try a Gemini client using the new google-genai SDK."""
+        # Convert messages to Gemini format
+        prompt_parts = []
+        for msg in messages:
+            if msg["role"] == "system":
+                prompt_parts.append(f"Instructions: {msg['content']}\n\n")
+            elif msg["role"] == "user":
+                prompt_parts.append(msg["content"])
 
-        # Try each Groq client starting from current index
-        attempts = len(self.groq_clients)
+        full_prompt = "".join(prompt_parts)
 
-        for _ in range(attempts):
-            client = self.groq_clients[self.current_groq_index]
-            key_name = self.groq_key_names[self.current_groq_index]
-
-            try:
-                response = await client.chat.completions.create(
-                    model=settings.LLM_MODEL,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                return response.choices[0].message.content
-
-            except Exception as e:
-                print(f"Groq error ({key_name}): {e}")
-
-                # If rate limited, try the next key
-                if self._is_rate_limit_error(e):
-                    old_index = self.current_groq_index
-                    self.current_groq_index = (self.current_groq_index + 1) % len(self.groq_clients)
-
-                    if self.current_groq_index != old_index:
-                        new_key_name = self.groq_key_names[self.current_groq_index]
-                        print(f"Rate limited! Switching from {key_name} to {new_key_name}")
-                    else:
-                        print(f"All Groq keys are rate limited!")
-                        return None  # All keys exhausted
-                else:
-                    # Non-rate-limit error, don't switch keys
-                    return None
-
-        return None
+        response = await client.aio.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=full_prompt,
+            config={
+                "temperature": temperature,
+                "max_output_tokens": max_tokens
+            }
+        )
+        return response.text
 
     async def generate(
             self,
@@ -99,34 +106,44 @@ class LLMService:
     ) -> str:
         """
         Generate a response from the LLM.
-        Tries multiple Groq keys if available, then falls back to OpenAI.
+        Fallback order: Groq 1 -> Gemini 1 -> Gemini 2 -> Groq 2
         """
-        messages = []
+        if not self.clients:
+            raise RuntimeError("No LLM service available. Please configure GROQ_API_KEY or GEMINI_API_KEY.")
 
+        messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-
         messages.append({"role": "user", "content": prompt})
 
-        # Try Groq (with automatic key switching on rate limit)
-        result = await self._try_groq(messages, temperature, max_tokens)
-        if result:
-            return result
+        # Try each client in fallback order
+        last_error = None
+        for i in range(len(self.clients)):
+            idx = (self.current_index + i) % len(self.clients)
+            client, name, provider = self.clients[idx]
 
-        # Fall back to OpenAI
-        if self.openai_client:
             try:
-                response = await self.openai_client.chat.completions.create(
-                    model="gpt-4-turbo-preview",
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                print(f"OpenAI error: {e}")
+                if provider == "groq":
+                    result = await self._try_groq(client, messages, temperature, max_tokens)
+                else:  # gemini
+                    result = await self._try_gemini(client, messages, temperature, max_tokens)
 
-        raise RuntimeError("No LLM service available. Please configure GROQ_API_KEY or OPENAI_API_KEY.")
+                # Success - update current index to this working client
+                self.current_index = idx
+                return result
+
+            except Exception as e:
+                print(f"LLM error ({name}): {e}")
+                last_error = e
+
+                if self._is_rate_limit_error(e):
+                    print(f"Rate limited on {name}, trying next provider...")
+                    continue
+                else:
+                    # Non-rate-limit error, still try next provider
+                    continue
+
+        raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
     async def generate_json(
             self,

@@ -15,7 +15,9 @@
       "Bash(dir /a \"C:\\\\Users\\\\AdamR\\\\Desktop\\\\CP493 Directed Research Project\\\\backend\"\")",
       "Bash(cmd /c \"dir /a C:\\\\Users\\\\AdamR\\\\Desktop\\\\CP493*Directed*Research*Project\\\\backend\"\")",
       "Bash(timeout:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(xargs basename:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

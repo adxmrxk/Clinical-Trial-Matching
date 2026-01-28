@@ -1,431 +1,354 @@
-from typing import Any, Dict, List, Optional
-import json
+from typing import Any, Dict, List, Optional, Set
+import random
 from .base_agent import BaseAgent
 from ..schemas.patient import PatientProfile
 
 
 class QuestionGenerationAgent(BaseAgent):
     """
-    Generates natural, empathetic follow-up questions based on identified
-    information gaps. Implements the three-phase questioning strategy:
-
-    Phase 1: Baseline screening (universal attributes)
-    Phase 2: Trial-driven questioning (criteria-aware)
-    Phase 3: Gap-filling and clarification (adaptive)
+    Generates follow-up questions based on identified information gaps.
+    OPTIMIZED: No LLM calls - uses rule-based question generation for speed.
     """
 
     def __init__(self):
         super().__init__(
             name="Question Generation Agent",
-            description="Generates targeted, criteria-driven follow-up questions for patients"
+            description="Generates targeted follow-up questions for patients"
         )
 
-        # Phase 1 baseline questions (asked first, regardless of trials)
-        # Phrased warmly and conversationally
-        # Priority determines the order questions are asked (lower = earlier)
+        # Track asked questions per session to avoid duplicates
+        self.asked_questions: Dict[str, Set[str]] = {}
+
+        # Phase 1 baseline questions
         self.phase1_questions = {
             "primary_condition": {
                 "question": "What medical condition are you hoping to find a trial for?",
-                "context": "This is the starting point for finding relevant trials for you.",
                 "priority": 0
             },
             "age": {
-                "question": "May I ask how old you are? This helps match you with trials that have specific age requirements.",
-                "context": "Different trials accept different age ranges.",
+                "question": "May I ask how old you are?",
                 "priority": 1
             },
             "biological_sex": {
-                "question": "Could you share your biological sex? Some trials are designed specifically for certain groups.",
-                "context": "Certain trials focus on conditions that affect specific biological sexes differently.",
+                "question": "What is your biological sex (male/female)?",
                 "priority": 2
             },
             "country": {
-                "question": "What country are you located in? This helps me find trials you can actually access.",
-                "context": "Clinical trials are conducted at specific locations.",
+                "question": "What country are you located in?",
                 "priority": 3
             },
             "state_province": {
-                "question": "Which state or province are you in? This helps me find trials closer to you.",
-                "context": "Finding nearby trials makes participation more convenient.",
+                "question": "Which state or province are you in?",
                 "priority": 4
             },
             "willing_to_travel": {
-                "question": "Would you be willing to travel to participate in a clinical trial, or would you prefer trials closer to home?",
-                "context": "Some excellent trials may require travel; knowing your preference helps narrow options.",
+                "question": "Would you be willing to travel for a trial?",
                 "priority": 5
             },
             "diagnosis_date": {
-                "question": "When were you first diagnosed with this condition? A rough timeframe is fine, like 'last year' or '3 months ago'.",
-                "context": "Some trials are for newly diagnosed patients while others are for those with longer history.",
+                "question": "When were you first diagnosed? A rough timeframe is fine.",
                 "priority": 6
             },
             "current_medications": {
-                "question": "Are you currently taking any medications? If so, could you list them? If not, just let me know.",
-                "context": "Some trials have requirements about current medications or may interact with them.",
+                "question": "Are you currently taking any medications? List them or say 'none'.",
                 "priority": 7,
                 "tracks_field": "asked_medications"
             },
             "prior_treatments": {
-                "question": "What treatments have you already tried for this condition, if any? This could include medications, therapies, or procedures.",
-                "context": "Many trials are looking for patients who have or haven't tried specific treatments.",
+                "question": "What treatments have you already tried? Or 'none' if you haven't.",
                 "priority": 8,
                 "tracks_field": "asked_prior_treatments"
             }
         }
 
-        # Sensitive topics that need careful phrasing
-        self.sensitive_topics = {
-            "pregnancy_status": "pregnancy or reproductive health",
-            "smoking_status": "tobacco use",
-            "alcohol_use": "alcohol consumption",
-            "mental_health": "mental health conditions",
-            "hiv_status": "HIV status",
-            "substance_use": "substance use"
+        # Pre-built Phase 2/3 questions for common criteria (NO LLM needed)
+        self.criteria_questions = {
+            "ecog": "What is your current activity level? Can you work and do daily activities normally, or do you need some rest during the day?",
+            "ecog_status": "What is your current activity level? Can you work and do daily activities normally, or do you need some rest during the day?",
+            "performance_status": "How would you describe your daily activity level? Fully active, or do you need rest periods?",
+            "other_cancers": "Have you ever been diagnosed with any other type of cancer besides your current condition?",
+            "cancer_history": "Have you ever been diagnosed with any other type of cancer?",
+            "metastatic": "Has your cancer spread to other parts of your body (metastasized)?",
+            "metastasis": "Has your cancer spread to other parts of your body?",
+            "brain_metastases": "Have you been told if your cancer has spread to your brain?",
+            "liver": "Do you have any liver conditions or problems?",
+            "kidney": "Do you have any kidney conditions or problems?",
+            "heart": "Do you have any heart conditions?",
+            "cardiac": "Do you have any heart or cardiovascular conditions?",
+            "diabetes": "Do you have diabetes?",
+            "hiv": "This is optional - do you know your HIV status?",
+            "hepatitis": "Have you ever been diagnosed with hepatitis B or C?",
+            "pregnant": "Are you currently pregnant or planning to become pregnant?",
+            "pregnancy": "Are you currently pregnant or planning to become pregnant?",
+            "breastfeeding": "Are you currently breastfeeding?",
+            "surgery": "Have you had any surgeries related to your condition? If so, when?",
+            "radiation": "Have you received radiation therapy? If so, when was your last treatment?",
+            "chemotherapy": "Have you received chemotherapy? If so, what type and when?",
+            "immunotherapy": "Have you received any immunotherapy treatments?",
+            "hormone": "Have you received any hormone therapy?",
+            "biomarker": "Do you know any of your biomarker or genetic test results (like HER2, BRCA, etc.)?",
+            "mutation": "Have you had any genetic testing done? Do you know of any mutations?",
+            "stage": "What stage is your condition? (e.g., Stage 1, 2, 3, or 4)",
+            "grade": "Do you know the grade of your cancer?",
+            "comorbidities": "Do you have any other medical conditions I should know about?",
+            "autoimmune": "Do you have any autoimmune conditions (like lupus, rheumatoid arthritis, etc.)?",
+            "transplant": "Have you ever had an organ transplant?",
+            "blood_clot": "Have you ever had blood clots or clotting disorders?",
+            "bleeding": "Do you have any bleeding disorders?",
+            "allergy": "Do you have any drug allergies I should know about?",
+            "smoking": "Do you currently smoke or have you smoked in the past?",
+            "alcohol": "How would you describe your alcohol consumption?",
         }
 
     def get_system_prompt(self) -> str:
-        return """You are a compassionate clinical trial assistant helping patients find suitable trials.
+        return ""  # Not used - no LLM calls
 
-Your role is to generate follow-up questions that:
-1. Are natural and conversational, not clinical or robotic
-2. Are empathetic and non-judgmental
-3. Explain why the information is needed (transparency)
-4. Avoid medical jargon when possible
-5. Never ask about multiple unrelated topics in one question
-6. Respect patient privacy and comfort
+    def _get_session_asked(self, session_id: str) -> Set[str]:
+        """Get set of asked question attributes for a session."""
+        if session_id not in self.asked_questions:
+            self.asked_questions[session_id] = set()
+        return self.asked_questions[session_id]
 
-For sensitive topics (pregnancy, substance use, mental health), be especially gentle and explain that:
-- The information is optional
-- It's only used to find appropriate trials
-- Their privacy is protected
+    def _mark_asked(self, session_id: str, attribute: str):
+        """Mark an attribute as asked for a session."""
+        self._get_session_asked(session_id).add(attribute.lower())
 
-Always prioritize the patient's comfort while gathering necessary information."""
+    def _was_asked(self, session_id: str, attribute: str) -> bool:
+        """Check if an attribute was already asked (with smart matching for similar topics)."""
+        attr_lower = attribute.lower()
+        asked = self._get_session_asked(session_id)
+
+        # Direct match
+        if attr_lower in asked:
+            return True
+
+        # Smart matching for similar topics
+        similar_groups = [
+            {"cancer", "cancers", "other_cancer", "other_cancers", "cancer_history", "malignancy", "tumor"},
+            {"heart", "cardiac", "cardiovascular", "heart_disease", "heart_condition"},
+            {"liver", "hepatic", "liver_disease", "liver_function"},
+            {"kidney", "renal", "kidney_disease", "kidney_function"},
+            {"diabetes", "diabetic", "blood_sugar", "glucose"},
+            {"pregnant", "pregnancy", "pregnancy_status", "reproductive"},
+            {"smoke", "smoking", "smoking_status", "tobacco", "cigarette"},
+            {"alcohol", "alcohol_use", "drinking"},
+            {"metastatic", "metastasis", "metastases", "spread"},
+            {"surgery", "surgical", "operation"},
+            {"chemo", "chemotherapy", "chemo_therapy"},
+            {"radiation", "radiotherapy", "radiation_therapy"},
+            {"immunotherapy", "immuno", "immune_therapy"},
+            {"hormone", "hormonal", "hormone_therapy"},
+            {"biomarker", "marker", "genetic", "mutation", "gene"},
+            {"ecog", "performance", "performance_status", "activity_level"},
+            {"stage", "staging", "cancer_stage"},
+            {"comorbidity", "comorbidities", "other_conditions", "medical_conditions"},
+            {"allergy", "allergies", "allergic"},
+            {"transplant", "organ_transplant"},
+            {"autoimmune", "auto_immune", "autoimmune_disease"},
+        ]
+
+        for group in similar_groups:
+            # Check if attribute belongs to this group
+            if any(term in attr_lower or attr_lower in term for term in group):
+                # Check if any term from this group was already asked
+                for asked_topic in asked:
+                    if any(term in asked_topic or asked_topic in term for term in group):
+                        return True
+
+        return False
 
     async def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Generate follow-up questions based on current phase and information gaps.
-
-        Input:
-            patient_profile: PatientProfile - Current patient profile
-            phase: int - Current conversation phase (1, 2, or 3)
-            gaps: List[dict] - Information gaps from Gap Analysis Agent (for phases 2-3)
-            trial_context: Optional context about specific trials
-            asked_medications: bool - Whether medications question has been asked
-            asked_prior_treatments: bool - Whether prior treatments question has been asked
-
-        Output:
-            questions: List of question objects with text and metadata
-            phase_explanation: Why these questions are being asked
-            suggested_response: A natural response incorporating questions
-            next_tracks_field: Optional field to mark as asked after this response
-        """
+        """Generate follow-up questions - NO LLM CALLS for speed."""
         profile: PatientProfile = input_data.get("patient_profile", PatientProfile())
         phase: int = input_data.get("phase", 1)
         gaps: List[dict] = input_data.get("gaps", [])
-        trial_context: Optional[str] = input_data.get("trial_context")
         asked_medications: bool = input_data.get("asked_medications", False)
         asked_prior_treatments: bool = input_data.get("asked_prior_treatments", False)
+        session_id: str = input_data.get("session_id", "default")
+        answered_topics: List[str] = input_data.get("answered_topics", [])
+        phase1_asked: set = input_data.get("phase1_asked", set())
+        phase2_asked: set = input_data.get("phase2_asked", set())
+        phase2_questions_count: int = input_data.get("phase2_questions_count", 0)
+
+        # Add answered_topics to the session tracking
+        for topic in answered_topics:
+            self._mark_asked(session_id, topic)
 
         if phase == 1:
-            return await self._generate_phase1_questions(profile, asked_medications, asked_prior_treatments)
-        elif phase == 2:
-            return await self._generate_phase2_questions(profile, gaps, trial_context)
-        else:  # Phase 3
-            return await self._generate_phase3_questions(profile, gaps, trial_context)
+            return self._generate_phase1_questions(
+                profile, asked_medications, asked_prior_treatments,
+                session_id, phase1_asked
+            )
+        else:
+            return self._generate_phase2_3_questions(
+                profile, gaps, phase, session_id,
+                phase2_asked, phase2_questions_count
+            )
 
-    async def _generate_phase1_questions(
+    def _generate_phase1_questions(
         self,
         profile: PatientProfile,
-        asked_medications: bool = False,
-        asked_prior_treatments: bool = False
+        asked_medications: bool,
+        asked_prior_treatments: bool,
+        session_id: str = "default",
+        phase1_asked: set = None
     ) -> Dict[str, Any]:
-        """Generate baseline screening questions (Phase 1)."""
+        """Generate baseline questions (Phase 1) - NO LLM.
+
+        IMPORTANT: Once a question has been asked, we do NOT repeat it.
+        If the user's answer was invalid, the validation error handling
+        will prompt them to correct it without re-asking the full question.
+        """
         profile_dict = profile.model_dump()
+        phase1_asked = phase1_asked or set()
         missing = []
 
-        # Find missing Phase 1 attributes
         for attr, q_info in self.phase1_questions.items():
+            # CRITICAL: Skip if this question was already asked - NEVER repeat
+            if attr in phase1_asked:
+                continue
+
             value = profile_dict.get(attr)
 
-            # Special handling for medications and prior_treatments (tracked separately)
-            if attr == "current_medications":
-                if not asked_medications:
-                    missing.append({
-                        "attribute": attr,
-                        "question": q_info["question"],
-                        "context": q_info["context"],
-                        "priority": q_info["priority"],
-                        "phase": 1,
-                        "tracks_field": "asked_medications"
-                    })
+            # Special handling for tracked fields
+            if attr == "current_medications" and asked_medications:
+                continue
+            if attr == "prior_treatments" and asked_prior_treatments:
                 continue
 
-            if attr == "prior_treatments":
-                if not asked_prior_treatments:
-                    missing.append({
-                        "attribute": attr,
-                        "question": q_info["question"],
-                        "context": q_info["context"],
-                        "priority": q_info["priority"],
-                        "phase": 1,
-                        "tracks_field": "asked_prior_treatments"
-                    })
-                continue
-
-            # For all other fields, check if value is None or empty
-            if value is None or value == "":
+            if value is None or value == "" or (isinstance(value, list) and len(value) == 0):
                 missing.append({
                     "attribute": attr,
                     "question": q_info["question"],
-                    "context": q_info["context"],
                     "priority": q_info["priority"],
-                    "phase": 1
+                    "phase": 1,
+                    "tracks_field": q_info.get("tracks_field")
                 })
 
-        # Sort by priority
         missing.sort(key=lambda x: x["priority"])
-
-        # Take top 1 question at a time for natural conversation flow
         questions = missing[:1]
 
-        # Generate a natural response incorporating the questions
         if questions:
-            suggested_response = await self._generate_natural_response(
-                questions,
-                phase=1,
-                profile=profile
-            )
+            q = questions[0]
+            suggested_response = q["question"]
         else:
             suggested_response = None
-
-        # Track which field this question will mark as asked
-        next_tracks_field = questions[0].get("tracks_field") if questions else None
 
         return {
             "questions": questions,
             "phase": 1,
-            "phase_explanation": "Phase 1: Collecting baseline information to begin searching for relevant trials.",
+            "phase_explanation": "Collecting baseline information.",
             "suggested_response": suggested_response,
             "all_baseline_collected": len(missing) == 0,
-            "next_tracks_field": next_tracks_field
+            "next_tracks_field": questions[0].get("tracks_field") if questions else None
         }
 
-    async def _generate_phase2_questions(
+    def _generate_phase2_3_questions(
         self,
         profile: PatientProfile,
         gaps: List[dict],
-        trial_context: Optional[str]
+        phase: int,
+        session_id: str,
+        phase2_asked: set = None,
+        phase2_questions_count: int = 0
     ) -> Dict[str, Any]:
-        """Generate trial-driven questions (Phase 2)."""
+        """Generate trial-driven questions (Phase 2/3) - NO LLM, uses pre-built questions.
 
-        if not gaps:
+        IMPORTANT: Once a Phase 2 question has been asked, we do NOT repeat it.
+        If the user's answer was invalid, validation error handling will
+        prompt them to correct it without re-asking the full question.
+
+        Phase 2 is capped at 5 questions total, then we show trials.
+        """
+        phase2_asked = phase2_asked or set()
+
+        # If we've asked 5 questions OR no gaps, we're done
+        if phase2_questions_count >= 5 or not gaps:
             return {
                 "questions": [],
-                "phase": 2,
-                "phase_explanation": "No additional information needed from trials.",
+                "phase": phase,
+                "phase_explanation": "Ready to show trial results.",
                 "suggested_response": None
             }
 
-        # Convert gaps to questions using LLM
-        questions = await self._gaps_to_questions(gaps, profile, trial_context)
-
-        # Generate natural response
-        if questions:
-            suggested_response = await self._generate_natural_response(
-                questions[:2],  # Limit to 2 questions at a time
-                phase=2,
-                profile=profile,
-                trial_context=trial_context
-            )
-        else:
-            suggested_response = None
-
-        return {
-            "questions": questions[:3],  # Return up to 3 for display
-            "phase": 2,
-            "phase_explanation": "Phase 2: Asking trial-specific questions based on eligibility criteria from matched trials.",
-            "suggested_response": suggested_response
-        }
-
-    async def _generate_phase3_questions(
-        self,
-        profile: PatientProfile,
-        gaps: List[dict],
-        trial_context: Optional[str]
-    ) -> Dict[str, Any]:
-        """Generate gap-filling questions (Phase 3)."""
-
-        if not gaps:
-            return {
-                "questions": [],
-                "phase": 3,
-                "phase_explanation": "All necessary information collected.",
-                "suggested_response": None
-            }
-
-        # Focus on remaining unknowns and clarifications
-        questions = await self._gaps_to_questions(
-            gaps,
-            profile,
-            trial_context,
-            is_clarification=True
-        )
-
-        if questions:
-            suggested_response = await self._generate_natural_response(
-                questions[:2],
-                phase=3,
-                profile=profile,
-                trial_context=trial_context
-            )
-        else:
-            suggested_response = None
-
-        return {
-            "questions": questions[:2],
-            "phase": 3,
-            "phase_explanation": "Phase 3: Final clarifications to confirm eligibility and finalize your personalized trial recommendations.",
-            "suggested_response": suggested_response
-        }
-
-    async def _gaps_to_questions(
-        self,
-        gaps: List[dict],
-        profile: PatientProfile,
-        trial_context: Optional[str],
-        is_clarification: bool = False
-    ) -> List[dict]:
-        """Convert information gaps to natural questions using LLM."""
-
-        if not gaps:
-            return []
-
-        # Check for sensitive topics
-        sensitive_gaps = []
-        regular_gaps = []
+        questions = []
+        profile_dict = profile.model_dump()
 
         for gap in gaps:
-            attr = gap.get("attribute", "").lower()
-            is_sensitive = any(s in attr for s in self.sensitive_topics.keys())
-            if is_sensitive:
-                sensitive_gaps.append(gap)
-            else:
-                regular_gaps.append(gap)
+            attr = gap.get("attribute", "").lower().strip()
 
-        # Prioritize regular gaps, then sensitive
-        ordered_gaps = regular_gaps + sensitive_gaps
+            # CRITICAL: Skip if this Phase 2 question was already asked - NEVER repeat
+            if attr in phase2_asked:
+                continue
 
-        prompt = f"""Convert these information gaps into natural, empathetic patient questions.
+            # Skip if already asked this session (backup check)
+            if self._was_asked(session_id, attr):
+                continue
 
-INFORMATION GAPS:
-{json.dumps(ordered_gaps[:5], indent=2)}
+            # Skip if we already have this info in profile
+            if attr in profile_dict and profile_dict[attr]:
+                continue
 
-CURRENT PATIENT INFO:
-- Condition: {profile.primary_condition or 'Not yet provided'}
-- Age: {profile.age or 'Not yet provided'}
+            # Find matching pre-built question
+            question_text = None
+            for key, q_text in self.criteria_questions.items():
+                if key in attr or attr in key:
+                    question_text = q_text
+                    break
 
-{"TRIAL CONTEXT: " + trial_context if trial_context else ""}
+            # Fallback: generate simple question from attribute name
+            if not question_text:
+                readable_attr = attr.replace("_", " ").replace("-", " ")
+                question_text = f"Could you tell me about your {readable_attr}?"
 
-{"These are CLARIFICATION questions - be extra gentle and explain why we're asking again." if is_clarification else ""}
+            questions.append({
+                "attribute": attr,
+                "question": question_text,
+                "phase": phase
+            })
 
-For each gap, generate a question object with:
-1. attribute: The attribute being asked about
-2. question: A natural, conversational question
-3. context: Brief explanation of why this matters (1 sentence)
-4. is_sensitive: true if this is a sensitive topic
-5. optional_note: If sensitive, a note that answering is optional
+            # Mark as asked
+            self._mark_asked(session_id, attr)
 
-IMPORTANT:
-- Don't be robotic or clinical
-- Show empathy
-- Keep questions short and clear
-- For sensitive topics, add reassurance
+            # Only ask 1 question at a time
+            if len(questions) >= 1:
+                break
 
-Respond with a JSON array:
-[
-  {{
-    "attribute": "string",
-    "question": "string",
-    "context": "string",
-    "is_sensitive": boolean,
-    "optional_note": "string or null"
-  }}
-]"""
-
-        try:
-            response = await self.llm.generate_json(prompt, self.get_system_prompt())
-            questions = json.loads(response)
-            if isinstance(questions, list):
-                # Add phase info
-                for q in questions:
-                    q["phase"] = 3 if is_clarification else 2
-                return questions
-        except Exception as e:
-            print(f"Question generation error: {e}")
-
-        # Fallback: use question hints from gaps
-        fallback_questions = []
-        for gap in ordered_gaps[:3]:
-            hint = gap.get("question_hint", gap.get("reason", ""))
-            if hint:
-                fallback_questions.append({
-                    "attribute": gap.get("attribute", "unknown"),
-                    "question": hint if "?" in hint else f"Could you tell me about your {gap.get('attribute', 'medical history')}?",
-                    "context": gap.get("reason", "This helps us evaluate trial eligibility."),
-                    "is_sensitive": False,
-                    "phase": 3 if is_clarification else 2
-                })
-
-        return fallback_questions
-
-    async def _generate_natural_response(
-        self,
-        questions: List[dict],
-        phase: int,
-        profile: PatientProfile,
-        trial_context: Optional[str] = None
-    ) -> str:
-        """Generate a natural conversational response incorporating questions."""
-        import random
-
-        if not questions:
-            return ""
-
-        # Varied acknowledgments
-        acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!", "Appreciate that!", "Wonderful!"]
-        transitions = ["Now,", "Next,", "Moving on,", "Also,", "I'd also like to know -", "One more thing -"]
-
-        # Phase-specific natural responses
-        if phase == 1:
-            if not profile.primary_condition:
-                return questions[0]["question"]
-
-            # Acknowledge and ask next question with variety
-            ack = random.choice(acks)
-            q_text = questions[0]["question"]
-            return f"{ack} {q_text}"
-
-        elif phase == 2:
-            # Trial-driven phase - explain we found matches and need specifics
-            intros = [
-                "To help determine which trials you might qualify for, ",
+        if questions:
+            # Add variety to the response
+            acks = ["Got it!", "Thanks!", "Perfect!", "Great!", "Noted!"]
+            intros_p2 = [
+                "To check your eligibility for these trials - ",
                 "Some trials have specific requirements - ",
-                "To narrow down the best matches, ",
+                "To narrow down the best matches - ",
             ]
-            intro = random.choice(intros)
-            q1 = questions[0]["question"]
-            return intro + q1.lower() if q1[0].isupper() else intro + q1
+            intros_p3 = [
+                "Almost done! ",
+                "Just one more thing - ",
+                "Nearly there! ",
+            ]
 
-        else:  # Phase 3
-            # Final clarifications - be encouraging
-            intros = [
-                "We're almost there! ",
-                "Just a bit more - ",
-                "Nearly done! ",
-                "One last thing - "
-            ]
-            intro = random.choice(intros)
-            return intro + questions[0]["question"]
+            ack = random.choice(acks)
+            if phase == 2:
+                intro = random.choice(intros_p2)
+            else:
+                intro = random.choice(intros_p3)
+
+            suggested_response = f"{ack} {intro}{questions[0]['question'].lower()}"
+        else:
+            suggested_response = None
+
+        return {
+            "questions": questions,
+            "phase": phase,
+            "phase_explanation": f"Phase {phase}: {'Trial-driven' if phase == 2 else 'Final'} questions.",
+            "suggested_response": suggested_response
+        }
+
+    def clear_session(self, session_id: str):
+        """Clear asked questions for a session."""
+        if session_id in self.asked_questions:
+            del self.asked_questions[session_id]
 
 
 # Singleton instance

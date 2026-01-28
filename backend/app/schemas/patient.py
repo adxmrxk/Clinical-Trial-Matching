@@ -71,3 +71,13 @@ class ConversationState(BaseModel):
     # Track which baseline questions have been asked (for questions where empty is valid)
     asked_medications: bool = Field(False, description="Whether we've asked about current medications")
     asked_prior_treatments: bool = Field(False, description="Whether we've asked about prior treatments")
+
+    # Track ALL answered topics to prevent duplicate questions
+    answered_topics: List[str] = Field(default_factory=list, description="Topics user has already answered")
+
+    # Track Phase 1 questions that have been ASKED (to never repeat them)
+    phase1_asked: List[str] = Field(default_factory=list, description="Phase 1 questions already asked - NEVER repeat")
+
+    # Track Phase 2 questions - NEVER repeat, cap at 5 total
+    phase2_asked: List[str] = Field(default_factory=list, description="Phase 2 questions already asked - NEVER repeat")
+    phase2_questions_count: int = Field(0, description="Number of Phase 2 questions asked - cap at 5")
