@@ -1,0 +1,140 @@
+Rule-Based Clinical Trial Matching - Where the Ideas Came From
+==============================================================
+
+This file explains which research papers influenced the design of our rule-based
+matching system and what specific ideas we borrowed from each one.
+
+
+The Main Papers We Drew From
+----------------------------
+
+1. The GATE/JAPE Paper (PMC6993990)
+   "A rule-based approach to identify patient eligibility criteria..."
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC6993990/
+
+   This was probably the most influential paper for our approach. The authors
+   built 14 different medical dictionaries by hand - things like lists of
+   drug names, condition synonyms, and abbreviations. They also had a clever
+   way of detecting negation by looking for words like "no", "not", "none",
+   and "without" appearing before medical terms.
+
+   We borrowed:
+   - The idea of building synonym dictionaries (e.g., "heart attack" = "MI" =
+     "myocardial infarction")
+   - Their negation detection approach using stopword lists
+   - How they handled time-based criteria ("within 6 months", "at least 2 weeks")
+
+   The paper achieved about 89% accuracy, which showed us that a well-designed
+   rule-based system can actually work pretty well.
+
+
+2. The Cancer Trials Algorithm Paper (PMC11570988)
+   "Implementation of a rule-based algorithm to find patients eligible..."
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC11570988/
+
+   This team focused specifically on cancer trials and had good regex patterns
+   for extracting things like cancer staging (Stage I, II, III, IV) and
+   biomarker status. They took a hierarchical approach - first identify the
+   patient, then check each criterion one by one.
+
+   We borrowed:
+   - Their regex patterns for age ranges ("18 years or older", "between 40-65")
+   - The approach for extracting lab values with units
+   - ECOG performance status parsing
+   - The general hierarchical structure
+
+   They reported 92% accuracy at ruling out ineligible patients, which is
+   actually more important than finding eligible ones (you don't want to
+   waste anyone's time).
+
+
+3. TrialMatcher (PMC11141802)
+   "TrialMatcher: An NLP-Based Clinical Trial Matching System"
+   https://pmc.ncbi.nlm.nih.gov/articles/PMC11141802/
+
+   This paper had a nice clean way of thinking about the problem: represent
+   both the patient and the trial as dictionaries, then compare them. For
+   inclusion criteria, the patient needs to have the attribute. For exclusion
+   criteria, they need to NOT have it.
+
+   We borrowed:
+   - The dictionary-based patient profile structure
+   - Their Boolean logic for inclusion vs exclusion
+   - The idea of matching at the criterion level first, then rolling up
+
+   They had a good quote that stuck with us: "Any concepts present in the
+   inclusion criteria are required for eligibility, and any concepts in the
+   exclusion criteria would preclude eligibility." Simple but useful framing.
+
+
+4. TrialGPT (Nature Communications)
+   "TrialGPT: Matching patients to clinical trials with large language models"
+   https://www.nature.com/articles/s41467-024-53081-z
+
+   Even though this paper is about using LLMs (which we're not doing here),
+   their three-stage architecture made a lot of sense: first narrow down the
+   trials, then evaluate each criterion, then aggregate into a final decision.
+
+   We borrowed:
+   - The modular design philosophy
+   - Criterion-level evaluation before trial-level aggregation
+   - The idea of tracking "satisfied", "violated", and "unknown" separately
+
+
+How Each Implementation Step Maps to the Papers
+-----------------------------------------------
+
+Step 1 (Dictionaries & Categories)
+   Mostly from the GATE/JAPE paper's 14 dictionaries, plus the hierarchical
+   categories from the cancer trials paper.
+
+Step 2 (Regex Patterns)
+   Primarily from the cancer trials paper, which had well-tested patterns
+   for numeric extraction.
+
+Step 3 (Evaluators)
+   A combination of all the papers - each had good ideas for different
+   types of criteria.
+
+Step 4 (Negation Detection)
+   Straight from the GATE/JAPE paper's stopword approach.
+
+Step 5 (Comorbidity & Medication Matching)
+   Inspired by TrialMatcher's dictionary-based matching.
+
+Step 6 (Time-Based Criteria)
+   From the GATE/JAPE paper's temporal frame detection.
+
+Step 7 (Aggregation)
+   Combined TrialGPT's structure with TrialMatcher's Boolean logic.
+
+
+What We Didn't Use
+------------------
+
+Some papers in the literature review used machine learning approaches that
+we intentionally avoided for this implementation:
+
+- The Pediatric Leukemia paper used sentence embeddings with SVM classifiers.
+  That's a solid approach but requires labeled training data.
+
+- PRISM/OncoLLM fine-tuned a domain-specific language model. Great results
+  but needs significant compute resources.
+
+- Several papers just threw GPT-4 at the problem. Works okay but expensive
+  and slower than rule-based matching.
+
+The whole point of this implementation was to see how far we could get with
+pure rule-based logic - no ML, no LLMs. The answer seems to be "pretty far"
+for straightforward criteria like age, sex, and lab values, though complex
+or ambiguous criteria still need human review or smarter approaches.
+
+
+References
+----------
+
+[1] https://pmc.ncbi.nlm.nih.gov/articles/PMC6993990/
+[2] https://pmc.ncbi.nlm.nih.gov/articles/PMC11570988/
+[3] https://pmc.ncbi.nlm.nih.gov/articles/PMC11141802/
+[4] https://www.nature.com/articles/s41467-024-53081-z
+[5] https://www.sciencedirect.com/science/article/pii/S1359644624002642

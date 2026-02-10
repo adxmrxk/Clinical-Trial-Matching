@@ -9,12 +9,17 @@ from ..schemas.trial import (
     EligibilityStatus,
     TrialMatch
 )
+# Import the comprehensive rule-based matcher (rule-based-approach branch)
+from ..matching.rule_based_matcher import RuleBasedEvaluator
 
 
 class EligibilityMatchingAgent(BaseAgent):
     """
     Agent responsible for matching patient profiles against
     trial eligibility criteria and generating explainable outcomes.
+
+    NOTE: This branch (rule-based-approach) uses comprehensive rule-based
+    matching from the matching module. LLM is only used as fallback.
     """
 
     def __init__(self):
@@ -22,6 +27,8 @@ class EligibilityMatchingAgent(BaseAgent):
             name="Eligibility Matching Agent",
             description="Match patients to clinical trial criteria with explainable reasoning."
         )
+        # Initialize the comprehensive rule-based evaluator
+        self.rule_evaluator = RuleBasedEvaluator()
 
     def get_system_prompt(self) -> str:
         return """You are a clinical trial eligibility evaluator. Your job is to determine if a patient meets specific eligibility criteria.
@@ -155,51 +162,71 @@ Return JSON with status, patient_value, explanation, and missing_attribute (if u
             profile: PatientProfile
     ) -> Dict[str, Any] | None:
         """
-        Evaluate common criteria using rules instead of LLM.
-        Returns None if rule-based evaluation not possible.
+        Evaluate criteria using the comprehensive rule-based matcher.
+
+        This version (rule-based-approach branch) uses the full rule-based
+        evaluator which handles: age, sex, ECOG, lab values, comorbidities,
+        medications, lifestyle factors, and temporal constraints.
+
+        Returns None only if the evaluator returns "unknown" status,
+        allowing LLM fallback for truly ambiguous cases.
         """
+        # Convert PatientProfile to dict for the evaluator
+        profile_dict = {
+            "age": profile.age,
+            "biological_sex": profile.biological_sex,
+            "primary_condition": profile.primary_condition,
+            "condition_stage": profile.condition_stage,
+            "diagnosis_date": profile.diagnosis_date,
+            "comorbidities": profile.comorbidities,
+            "prior_treatments": profile.prior_treatments,
+            "current_medications": profile.current_medications,
+            "allergies": profile.allergies,
+            "lab_values": profile.lab_values,
+            "smoking_status": profile.smoking_status,
+            "alcohol_use": profile.alcohol_use,
+            "pregnancy_status": profile.pregnancy_status,
+            "ecog_status": profile.ecog_status,
+            "additional_attributes": profile.additional_attributes,
+        }
 
-        # Age criteria
-        if criterion.attribute == "age" and profile.age is not None:
-            try:
-                threshold = int(criterion.value)
-                if criterion.operator == ">=":
-                    status = CriterionStatus.SATISFIED if profile.age >= threshold else CriterionStatus.VIOLATED
-                elif criterion.operator == "<=":
-                    status = CriterionStatus.SATISFIED if profile.age <= threshold else CriterionStatus.VIOLATED
-                elif criterion.operator == ">":
-                    status = CriterionStatus.SATISFIED if profile.age > threshold else CriterionStatus.VIOLATED
-                elif criterion.operator == "<":
-                    status = CriterionStatus.SATISFIED if profile.age < threshold else CriterionStatus.VIOLATED
-                else:
-                    return None
+        # Use the comprehensive rule-based evaluator
+        result = self.rule_evaluator.evaluate(
+            criterion_text=criterion.original_text or "",
+            criterion_type=criterion.criterion_type or "inclusion",
+            attribute=criterion.attribute,
+            operator=criterion.operator,
+            value=criterion.value,
+            patient_profile=profile_dict
+        )
 
-                return {
-                    "status": status,
-                    "patient_value": str(profile.age),
-                    "explanation": f"Patient age is {profile.age}, criterion requires {criterion.operator} {threshold}"
-                }
-            except ValueError:
-                return None
+        # Convert status string to CriterionStatus enum
+        status_map = {
+            "satisfied": CriterionStatus.SATISFIED,
+            "violated": CriterionStatus.VIOLATED,
+            "unknown": CriterionStatus.UNKNOWN,
+        }
 
-        # Sex criteria
-        if criterion.attribute in ["sex", "biological_sex", "gender"] and profile.biological_sex:
-            criterion_sex = criterion.value.lower() if criterion.value else ""
-            patient_sex = profile.biological_sex.value.lower()
+        # If rule-based evaluation gave a definitive answer, use it
+        if result.status in ["satisfied", "violated"]:
+            return {
+                "status": status_map[result.status],
+                "patient_value": result.patient_value,
+                "explanation": f"[Rule-based] {result.explanation}"
+            }
 
-            if criterion_sex == "all" or criterion_sex == patient_sex:
-                return {
-                    "status": CriterionStatus.SATISFIED,
-                    "patient_value": patient_sex,
-                    "explanation": f"Patient sex ({patient_sex}) matches criterion"
-                }
-            elif criterion_sex and criterion_sex != patient_sex:
-                return {
-                    "status": CriterionStatus.VIOLATED,
-                    "patient_value": patient_sex,
-                    "explanation": f"Criterion requires {criterion_sex}, patient is {patient_sex}"
-                }
+        # For "unknown" status, check if it's due to missing info
+        # If missing info, return the result (no point asking LLM)
+        # If not missing info but still unknown, let LLM try
+        if result.missing_attribute:
+            return {
+                "status": CriterionStatus.UNKNOWN,
+                "patient_value": result.patient_value,
+                "explanation": result.explanation,
+                "missing_attribute": result.missing_attribute
+            }
 
+        # Return None to trigger LLM fallback for complex/ambiguous criteria
         return None
 
     def _determine_eligibility(
