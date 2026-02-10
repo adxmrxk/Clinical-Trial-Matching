@@ -106,10 +106,11 @@ class ApiService {
 
   // Convert n8n trial match format
   private convertN8nTrialMatch(match: any): ClinicalTrial {
+    const trialId = match.trial_id || 'unknown';
     return {
-      id: match.trial_id || 'unknown',
-      nctId: match.trial_id || 'unknown',
-      title: match.trial_id || 'Clinical Trial',
+      id: trialId,
+      nctId: trialId,
+      title: trialId || 'Clinical Trial',
       status: 'Recruiting',
       condition: 'Not specified',
       location: 'Not specified',
@@ -118,6 +119,7 @@ class ApiService {
       criteriaMatched: (match.criteria_satisfied || []).map((c: any) => c.original_text || c),
       criteriaViolated: (match.criteria_violated || []).map((c: any) => c.original_text || c),
       criteriaUnknown: (match.criteria_unknown || []).map((c: any) => c.original_text || c),
+      officialUrl: `https://clinicaltrials.gov/study/${trialId}`,
     };
   }
 
