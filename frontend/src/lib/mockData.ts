@@ -3,6 +3,7 @@ import { ClinicalTrial } from '@/types';
 export const mockTrials: ClinicalTrial[] = [
   {
     id: 'NCT12345678',
+    nctId: 'NCT12345678',
     title: 'A Phase 3 Study of Novel Treatment for Type 2 Diabetes',
     status: 'Recruiting',
     condition: 'Type 2 Diabetes Mellitus',
@@ -17,9 +18,11 @@ export const mockTrials: ClinicalTrial[] = [
     ],
     criteriaViolated: [],
     criteriaUnknown: ['Current kidney function (eGFR)'],
+    officialUrl: 'https://clinicaltrials.gov/study/NCT12345678',
   },
   {
     id: 'NCT87654321',
+    nctId: 'NCT87654321',
     title: 'Evaluating a New Oral Medication for Diabetes Management',
     status: 'Recruiting',
     condition: 'Type 2 Diabetes Mellitus',
@@ -34,9 +37,11 @@ export const mockTrials: ClinicalTrial[] = [
       'History of diabetic ketoacidosis',
       'Liver function tests',
     ],
+    officialUrl: 'https://clinicaltrials.gov/study/NCT87654321',
   },
   {
     id: 'NCT11223344',
+    nctId: 'NCT11223344',
     title: 'Lifestyle Intervention Study for Prediabetes Prevention',
     status: 'Recruiting',
     condition: 'Prediabetes',
@@ -47,9 +52,11 @@ export const mockTrials: ClinicalTrial[] = [
     criteriaMatched: ['Age requirement met', 'Located in Canada'],
     criteriaViolated: ['Must have prediabetes, not Type 2 Diabetes'],
     criteriaUnknown: [],
+    officialUrl: 'https://clinicaltrials.gov/study/NCT11223344',
   },
   {
     id: 'NCT99887766',
+    nctId: 'NCT99887766',
     title: 'Continuous Glucose Monitoring Device Trial',
     status: 'Recruiting',
     condition: 'Diabetes Mellitus',
@@ -64,6 +71,7 @@ export const mockTrials: ClinicalTrial[] = [
     ],
     criteriaViolated: [],
     criteriaUnknown: ['Skin allergies or sensitivities'],
+    officialUrl: 'https://clinicaltrials.gov/study/NCT99887766',
   },
 ];
 
