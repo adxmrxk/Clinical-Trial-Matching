@@ -1,6 +1,13 @@
 import tempfile
 import os
-from faster_whisper import WhisperModel
+
+# Make faster-whisper optional for deployment
+try:
+    from faster_whisper import WhisperModel
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    WhisperModel = None
 
 
 class WhisperService:
@@ -9,10 +16,16 @@ class WhisperService:
     def __init__(self):
         self.model = None
         self.model_size = "base"  # Options: tiny, base, small, medium, large-v3
-        print(f"Whisper service initialized (model will load on first use: {self.model_size})")
+        if WHISPER_AVAILABLE:
+            print(f"Whisper service initialized (model will load on first use: {self.model_size})")
+        else:
+            print("Whisper not available - speech-to-text disabled")
 
     def _load_model(self):
         """Lazy load the Whisper model on first use."""
+        if not WHISPER_AVAILABLE:
+            raise RuntimeError("Speech-to-text is not available on this server")
+
         if self.model is None:
             print(f"Loading Whisper model '{self.model_size}'... (this may take a moment)")
             # Use CPU with int8 quantization for efficiency
