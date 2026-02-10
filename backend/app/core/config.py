@@ -18,8 +18,9 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Clinical Trial Matcher"
 
-    # CORS
+    # CORS - comma-separated list of allowed origins
     FRONTEND_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = ""  # Additional origins, comma-separated (e.g., "https://your-app.vercel.app")
 
     # ClinicalTrials.gov API
     CLINICAL_TRIALS_API_BASE: str = "https://clinicaltrials.gov/api/v2"
